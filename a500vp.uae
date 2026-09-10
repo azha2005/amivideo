@@ -1,0 +1,51 @@
+config_description=A500VP - Amiga 500 PAL, OCS, 512K chip + 512K slow (A501)
+config_hardware=true
+config_host=true
+
+; La ROM y el disquete quedan vacios a proposito: no se versiona ninguna ROM
+; ni ningun ADF. build.ps1 los rellena en la copia que lanza (-Rom), o los
+; elegis a mano en la GUI de WinUAE.
+kickstart_rom_file=
+floppy0=
+floppy0type=0
+floppy0wp=false
+nr_floppies=1
+floppy1type=-1
+floppy2type=-1
+floppy3type=-1
+
+; Velocidad de disquetera real: el tiempo de carga que medimos tiene que ser
+; el de la maquina de verdad, no el de un turbo.
+floppy_speed=100
+
+; --- maquina ---------------------------------------------------------------
+chipset=ocs
+chipset_compatible=A500
+ntsc=false
+cpu_type=68000
+cpu_model=68000
+cpu_compatible=true
+cpu_speed=real
+cycle_exact=true
+cpu_cycle_exact=true
+cpu_memory_cycle_exact=true
+blitter_cycle_exact=true
+immediate_blits=false
+cachesize=0
+
+; 512K chip (chipmem_size=1) + 512K slow en $C00000 (bogomem_size=2).
+; Cero fast RAM: el objetivo no tiene.
+chipmem_size=1
+bogomem_size=2
+fastmem_size=0
+z3mem_size=0
+
+; --- host ------------------------------------------------------------------
+gfx_width=720
+gfx_height=568
+gfx_lores=true
+gfx_linemode=double
+sound_output=exact
+sound_stereo=mixed
+win32.start_not_captured=true
+win32.nonotificationicon=true

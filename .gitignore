@@ -1,0 +1,17 @@
+# Nada de material de terceros ni binarios generados.
+work/
+*.adf
+*.rom
+*.png
+*.mp4
+*.mkv
+*.wav
+
+# Herramientas descargadas por tools\get-vasm.ps1
+tools/vasm/
+tools/vasm.tar.gz
+
+# Objetos
+*.o
+*.exe
+*.obj
