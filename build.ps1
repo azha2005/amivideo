@@ -68,6 +68,13 @@ function Build-All {
                        (Join-Path $root 'encoder\mkadf.c'),
                        '-o', (Join-Path $work 'mkadf.exe'))
 
+    Invoke-Tool $Gcc @('-std=c11', '-O2', '-Wall', '-Wextra', '-pedantic',
+                       (Join-Path $root 'encoder\color.c'),
+                       (Join-Path $root 'encoder\quant.c'),
+                       (Join-Path $root 'encoder\vio.c'),
+                       (Join-Path $root 'encoder\encode.c'),
+                       '-o', (Join-Path $work 'a500vp-enc.exe'), '-lm')
+
     Invoke-Tool (Join-Path $work 'mkadf.exe') @(
         '--boot',   (Join-Path $work 'boot.bin'),
         '--player', (Join-Path $work 'memcheck.bin'),

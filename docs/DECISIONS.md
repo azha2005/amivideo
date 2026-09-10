@@ -113,6 +113,117 @@ video (Hito 2) hay que decidir si se conserva o se libera; son 512 bytes.
 
 ---
 
+## 2026-09-10 — Hito 1: la fuente no necesita telecine inverso
+
+**Metodo:** `ffprobe` sobre *Fullmetal Alchemist Brotherhood OP 1_2.mp4*.
+
+1280x720, SAR 1:1, DAR 16:9, `field_order=progressive`, **24000/1001 =
+23,976024 fps** reales, 92,69 s, audio AAC 44100 Hz estereo.
+
+**Decision:** se toma 1:1, sin `fieldmatch,decimate`. Es una fuente
+progresiva de 23,976, no un telecine de 29,97.
+
+La aceleracion PAL queda en **+4,10 %**: 24,960205 / 23,976024 = 1,041044.
+Los primeros 30 s de fuente (720 frames) duran **28,846 s** en la Amiga.
+
+---
+
+## 2026-09-10 — El letterbox son 96 filas, no 90
+
+**Decision:** para una fuente 16:9 el area activa es **160x96**, con 32 filas
+de barra negra (16 arriba, 16 abajo).
+
+**Motivo:** `CLAUDE.md` estimaba "unas 90 filas". El numero exacto sale de la
+relacion de aspecto del pixel. La pantalla de 320x256 se ve en un tubo 4:3, o
+sea que un pixel de pantalla (y por lo tanto un pixel logico, que son 2x2) es
+1,0667 veces mas ancho que alto: la SAR 16:15 de PAL lowres.
+
+```
+filas = 160 x 1,0667 / (16/9) = 96
+```
+
+Comprobacion: 96 filas logicas son 192 lineas de pantalla; 192/256 x 3 = 2,25;
+4 / 2,25 = 1,7778 = 16:9 exacto.
+
+El calculo se hace en el encoder y no con `force_original_aspect_ratio` de
+ffmpeg, justamente porque ffmpeg supondria pixeles cuadrados.
+
+---
+
+## 2026-09-10 — Oklab en vez de CIE Lab
+
+**Decision:** el espacio perceptual del encoder es **Oklab**.
+
+**Motivo:** `CLAUDE.md` pedia "Lab o similar". Oklab no necesita elegir blanco
+de referencia, es mas barato de calcular y se porta bastante mejor con azules
+saturados, que en un opening de anime sobran. Se usa para el k-means, para
+elegir el color de paleta mas cercano y para medir el error.
+
+---
+
+## 2026-09-10 — Negro reservado y deduplicacion de paleta
+
+**Decision:** con letterbox, el indice 0 de la paleta queda fijo en `$000` y
+el k-means corre con n-1 centroides.
+
+**Motivo:** las barras ocupan el 25 % de la pantalla y tienen que ser negro
+exacto; el color 0 es ademas el fondo del Copper. Si se dejara al k-means,
+saldria un gris oscuro y las barras se verian sucias.
+
+**Correccion que hizo falta:** al redondear los centroides a RGB444, dos
+centroides distintos pueden caer en el mismo color. Con el negro reservado
+pasaba seguido: la escena del fuego terminaba con `000 000 ...`, o sea 7
+colores utiles en vez de 8. Ahora, si un color de la paleta queda repetido, se
+lo reemplaza por el color de la escena peor representado. El error medio bajo
+de 0,0414 a 0,0405.
+
+---
+
+## 2026-09-10 — Deteccion de cortes por distancia Oklab media
+
+**Decision:** hay corte de escena cuando la distancia Oklab media entre un
+frame y el anterior (solo sobre el area activa) supera 0,12, con un minimo de
+6 frames por escena.
+
+**Motivo:** se mide sobre el frame ya escalado a 160x96, que es exactamente lo
+que se va a cuantizar. Medirlo sobre la fuente en HD detectaria cosas que a
+160 px de ancho no existen.
+
+**Resultado en los primeros 30 s:** 15 escenas, error medio de cuantizacion
+0,0405 en Oklab. Y un dato que importa para el Hito 2: **el 45,6 % de los
+frames son casi identicos al anterior** (distancia < 0,008). Es lo que va a
+comprimir el comando de repeticion; el anime animado "en dos" se nota.
+
+---
+
+## 2026-09-10 — Realce despues de escalar, y lo que cuesta
+
+**Decision:** opcion `--sharpen F` (apagada por defecto) que mete un
+`unsharp=3:3:F:3:3:0` **despues** de escalar.
+
+**Motivo:** el anime vive de la linea negra de contorno. A 160 px de ancho,
+partiendo de 1280, esa linea es sub-pixel y el escalado la promedia hasta
+hacerla desaparecer: las caras quedan planas. Realzar despues de escalar la
+devuelve. Antes de escalar no serviria de nada.
+
+**El costo, medido:** con `--sharpen 1.2` los frames casi identicos bajan de
+45,6 % a 40,5 %. El realce agrega detalle de alta frecuencia, y ese detalle
+cambia entre frames. **Imagen mas nitida = mas bytes de delta.** Hay que
+volver a medirlo en el Hito 2 contra el presupuesto real.
+
+---
+
+## 2026-09-10 — El preview lleva la aceleracion PAL de verdad
+
+**Decision:** el preview mp4 va a 24,960205 fps y el audio se acelera con
+`asetrate` + `aresample`, no con `atempo`.
+
+**Motivo:** la television PAL sube la velocidad **y el tono**. `atempo`
+mantendria el tono y el preview no sonaria como va a sonar. El audio del
+preview ademas se mezcla a mono, que es lo que va a salir por Paula.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - **Velocidad de lectura de trackdisk.** `CLAUDE.md` estima 15–25 KB/s. Sin
