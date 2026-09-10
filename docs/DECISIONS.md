@@ -213,14 +213,42 @@ volver a medirlo en el Hito 2 contra el presupuesto real.
 
 ---
 
-## 2026-09-10 — El preview lleva la aceleracion PAL de verdad
+## 2026-09-10 — Cadencia nativa en vez de aceleracion PAL
 
-**Decision:** el preview mp4 va a 24,960205 fps y el audio se acelera con
-`asetrate` + `aresample`, no con `atempo`.
+**Esto contradice a `CLAUDE.md`, a pedido de Az.** El documento decia: "los
+frames de la fuente se toman 1:1 [...] el audio se remuestrea para durar
+exactamente lo mismo (con el cambio de tono, como en la TV PAL)". Az escucho
+el preview y el audio acelerado le molesto.
 
-**Motivo:** la television PAL sube la velocidad **y el tono**. `atempo`
-mantendria el tono y el preview no sonaria como va a sonar. El audio del
-preview ademas se mezcla a mono, que es lo que va a salir por Paula.
+**Decision:** por defecto `--rate native`. Se repite un frame cada tanto para
+que la velocidad sea la de la fuente y **el audio no se toca**. `--rate pal`
+mantiene el comportamiento viejo.
+
+**Como funciona:** la Amiga solo puede cambiar de frame cada 2 VBL, o sea
+24,960205 fps clavados. En vez de estirar el tiempo, se mapea cada hueco de
+pantalla al frame de fuente que le toca:
+
+```
+frame_fuente(hueco) = redondeo(hueco * 23,976024 / 24,960205)
+```
+
+Cuando el indice no avanza, sale un comando de repeticion.
+
+**Lo que cuesta, medido:** los primeros 30 s pasan de 720 a **750 huecos, de
+los cuales 30 son repeticiones** (4,1 %). En bytes de video eso es casi nada,
+porque el comando de repeticion ya existia para el anime animado en dos: los
+frames casi identicos suben de 40,5 % a 42,9 %. Lo unico que crece de verdad
+es el audio, que ahora dura 30,03 s en vez de 28,85 s: a ~4 KB/s son unos
+**4,7 KB mas**. Es una ganga.
+
+**Residuo:** 750 huecos son 30,048 s contra 30,030 s de fuente, 18 ms de
+diferencia en 30 s (0,06 %). El audio se estira eso, que es una milesima de
+semitono: inaudible.
+
+**Preview:** va a 24,960205 fps con el audio original en mono, que es lo que
+va a salir por Paula. En `--rate pal` el audio se acelera con
+`asetrate` + `aresample` y no con `atempo`, porque la TV PAL sube la velocidad
+**y** el tono, y el preview tiene que sonar como va a sonar.
 
 ---
 

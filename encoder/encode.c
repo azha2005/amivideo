@@ -46,6 +46,11 @@ static void usage(void)
 "  --start SEG             desde donde cortar la fuente (0)\n"
 "  --duration SEG          cuanto tomar; 0 = todo (0)\n"
 "  --aspect MODO           letterbox | crop | stretch (letterbox)\n"
+"  --rate MODO             native | pal (native)\n"
+"                            native: repite frames para respetar la velocidad\n"
+"                                    original; el audio no se toca\n"
+"                            pal:    frames 1:1, todo 4%% mas rapido y el\n"
+"                                    audio sube de tono, como la TV PAL\n"
 "  --planes N              2, 3 o 4 bitplanes = 4, 8 o 16 colores (3)\n"
 "  --dither MODO           none | bayer2 | bayer4 (none)\n"
 "  --dither-strength F     fuerza del dither ordenado (0.05)\n"
@@ -65,6 +70,7 @@ int main(int argc, char **argv)
     A5Dither dither = A5_DITHER_NONE;
     float dstrength = 0.05f;
     double sharpen = 0;
+    int    pal_speedup = 0;
     double scene_thr = 0.12;
     uint32_t seed = 1;
     int i;
@@ -74,8 +80,8 @@ int main(int argc, char **argv)
     int cols, rows, x0, y0, y1;
     int ncolors;
 
-    uint8_t **frames = NULL;
-    size_t nframes = 0, cap = 0;
+    uint8_t **frames = NULL, **srcframes = NULL;
+    size_t nframes = 0, cap = 0, nsrc = 0;
     FILE *dec, *pre;
     size_t fsz = (size_t)A5_W * A5_H * 3;
 
@@ -99,6 +105,12 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--scene-threshold") && has) scene_thr = atof(argv[++i]);
         else if (!strcmp(a, "--dither-strength") && has) dstrength = (float)atof(argv[++i]);
         else if (!strcmp(a, "--sharpen") && has)       sharpen = atof(argv[++i]);
+        else if (!strcmp(a, "--rate") && has) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "native"))   pal_speedup = 0;
+            else if (!strcmp(v, "pal")) pal_speedup = 1;
+            else die("--rate: native o pal");
+        }
         else if (!strcmp(a, "--no-audio"))             want_audio = 0;
         else if (!strcmp(a, "--aspect") && has) {
             const char *v = argv[++i];
@@ -218,10 +230,47 @@ int main(int argc, char **argv)
     a5_pclose(dec);
     if (nframes == 0) die("ffmpeg no devolvio ningun frame");
 
-    printf("frames     : %lu (%.3f s a %.6f fps de la Amiga)\n",
-           (unsigned long)nframes, nframes / A5_VIDEO_FPS, A5_VIDEO_FPS);
-    printf("             la fuente dura %.3f s: el PAL la acelera %.2f%%\n",
-           nframes / src.fps, (A5_VIDEO_FPS / src.fps - 1) * 100);
+    /* --- cadencia ---------------------------------------------------
+     * La Amiga solo puede cambiar de frame cada 2 VBL, o sea 24,960205 fps
+     * clavados. Una fuente de 23,976 se encaja de dos maneras:
+     *
+     *   pal    : frames 1:1. Todo corre 4,1% mas rapido, que es lo que hacia
+     *            la television PAL, y obliga a subir el tono del audio.
+     *   native : se repite un frame cada tanto para que la velocidad sea la
+     *            original y el audio quede intacto. Como el formato ya tiene
+     *            comando de repeticion, esos frames no cuestan casi nada.
+     *
+     * De aca en adelante se trabaja sobre los huecos de pantalla, no sobre
+     * los frames de la fuente.
+     */
+    {
+        double ratio = src.fps / A5_VIDEO_FPS;    /* frames fuente por hueco */
+        size_t nslots = pal_speedup ? nframes
+                                    : (size_t)(nframes / ratio + 0.5);
+        uint8_t **slots = malloc(nslots * sizeof *slots);
+        size_t k;
+
+        if (!slots) die("sin memoria");
+        for (k = 0; k < nslots; k++) {
+            size_t sidx = pal_speedup ? k : (size_t)(k * ratio + 0.5);
+            if (sidx >= nframes) sidx = nframes - 1;
+            slots[k] = frames[sidx];
+        }
+        srcframes = frames; nsrc = nframes;
+        frames = slots;     nframes = nslots;
+    }
+
+    printf("frames     : %lu de la fuente -> %lu en pantalla\n",
+           (unsigned long)nsrc, (unsigned long)nframes);
+    if (pal_speedup)
+        printf("             cadencia pal: %.3f s de fuente en %.3f s, "
+               "%.2f%% mas rapido\n", nsrc / src.fps, nframes / A5_VIDEO_FPS,
+               (A5_VIDEO_FPS / src.fps - 1) * 100);
+    else
+        printf("             cadencia native: %.3f s de fuente en %.3f s, "
+               "%lu frames repetidos, audio intacto\n",
+               nsrc / src.fps, nframes / A5_VIDEO_FPS,
+               (unsigned long)(nframes - nsrc));
 
     /* --- deteccion de cortes ---------------------------------------- */
     {
@@ -285,7 +334,8 @@ int main(int argc, char **argv)
     /* --- preview ---------------------------------------------------- */
     pre = a5_open_preview(preview, A5_DISP_W, A5_DISP_H, A5_VIDEO_FPS, pscale,
                           want_audio && src.audio_rate ? in : NULL,
-                          start, duration, A5_VIDEO_FPS / src.fps,
+                          start, duration,
+                          pal_speedup ? A5_VIDEO_FPS / src.fps : 1.0,
                           src.audio_rate);
     if (!pre) die("no pude arrancar ffmpeg para el preview");
 
@@ -358,7 +408,8 @@ int main(int argc, char **argv)
            A5_DISP_W * pscale, A5_DISP_H * pscale, nframes / A5_VIDEO_FPS);
     printf("tiempo     : %.1f s\n", (double)(clock() - t0) / CLOCKS_PER_SEC);
 
-    for (i = 0; (size_t)i < nframes; i++) free(frames[i]);
-    free(frames); free(prev); free(cur); free(delta); free(scenes);
+    for (i = 0; (size_t)i < nsrc; i++) free(srcframes[i]);
+    free(srcframes); free(frames);
+    free(prev); free(cur); free(delta); free(scenes);
     return 0;
 }
