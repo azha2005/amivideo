@@ -1,0 +1,54 @@
+;----------------------------------------------------------------------
+; exec.i - offsets y constantes del sistema que usamos.
+; Escrito a mano: no dependemos de los includes de NDK.
+;----------------------------------------------------------------------
+
+; --- exec.library LVOs ---
+_LVOForbid          equ -132
+_LVOPermit          equ -138
+_LVOAllocMem        equ -198
+_LVOFreeMem         equ -210
+_LVOAvailMem        equ -216
+_LVOOpenLibrary     equ -552
+_LVOCloseLibrary    equ -414
+_LVODoIO            equ -456
+
+; --- graphics.library LVOs ---
+_LVOLoadView        equ -222
+_LVOWaitTOF         equ -270
+
+; --- requisitos de memoria (exec/memory.i) ---
+MEMF_ANY            equ 0
+MEMF_PUBLIC         equ 1
+MEMF_CHIP           equ 2
+MEMF_FAST           equ 4
+MEMF_CLEAR          equ $00010000
+MEMF_LARGEST        equ $00020000
+; MEMF_TOTAL ($00080000) es V36+: NO usarlo, el objetivo es Kickstart 1.2/1.3.
+
+; --- struct IOStdReq ---
+IO_DEVICE           equ 20
+IO_UNIT             equ 24
+IO_COMMAND          equ 28
+IO_FLAGS            equ 30
+IO_ERROR            equ 31
+IO_ACTUAL           equ 32
+IO_LENGTH           equ 36
+IO_DATA             equ 40
+IO_OFFSET           equ 44
+
+; --- comandos de trackdisk.device ---
+CMD_READ            equ 2
+CMD_WRITE           equ 3
+CMD_UPDATE          equ 4       ; vacia el buffer de pista: sin esto no se graba
+TD_MOTOR            equ 9
+
+; --- custom chips ---
+CUSTOM              equ $dff000
+DMACON              equ $096
+DMACONR             equ $002
+INTENA              equ $09a
+INTREQ              equ $09c
+COP1LC              equ $080
+COPJMP1             equ $088
+COLOR00             equ $180
