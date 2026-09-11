@@ -299,13 +299,15 @@ static void usage(void)
 "  --preview PATH          mp4 opcional con la cuantizacion sin comprimir\n"
 "                          (el preview de verdad lo hace a500vp-dec)\n"
 "  --quality N             perdida permitida, 0 = sin perdida (8)\n"
-"  --budget BYTES          tope de tamano; 0 = sin tope (883712)\n"
+"  --budget BYTES          tope de tamano del video; 0 = sin tope\n"
+"                          (por defecto: 883712 menos el audio)\n"
+"  --audio-period N        periodo de Paula del audio (443 = 8006,5 Hz)\n"
 "  --repeat-boost F        cuanto mas permisivo es repetir que actualizar (1.5)\n"
-"  --stability F           histeresis temporal del cuantizador (0.10)\n"
+"  --stability F           histeresis temporal del cuantizador (0.07)\n"
 "  --frame-ms F            tope estimado de decodificacion por frame;\n"
 "                          0 = sin tope (40)\n"
 "  --min-hold N            actualizar la imagen como mucho cada N huecos;\n"
-"                          2 = 12,5 fps de imagenes distintas (1)\n"
+"                          2 = 12,5 fps de imagenes distintas (2)\n"
 "  --start SEG             desde donde cortar la fuente (0)\n"
 "  --duration SEG          cuanto tomar; 0 = todo (0)\n"
 "  --aspect MODO           letterbox | crop | stretch (letterbox)\n"
@@ -317,7 +319,7 @@ static void usage(void)
 "  --planes N              2, 3 o 4 bitplanes = 4, 8 o 16 colores (3)\n"
 "  --dither MODO           none | bayer2 | bayer4 (none)\n"
 "  --dither-strength F     fuerza del dither ordenado (0.05)\n"
-"  --sharpen F             realce de bordes tras escalar; 0 = nada (0)\n"
+"  --sharpen F             realce de bordes tras escalar; 0 = nada (1.2)\n"
 "  --denoise F             denoise temporal antes de escalar; 0 = nada (0)\n"
 "  --scene-threshold F     distancia Oklab media que dispara un corte (0.12)\n"
 "  --min-scene N           frames minimos por escena (6)\n"
@@ -334,15 +336,16 @@ int main(int argc, char **argv)
     int planes = 3, min_scene = 6, pscale = 2, want_audio = 1;
     A5Dither dither = A5_DITHER_NONE;
     float dstrength = 0.05f;
-    double sharpen = 0, denoise = 0;
+    double sharpen = 1.2, denoise = 0;
     int    pal_speedup = 0;
     double scene_thr = 0.12;
     uint32_t seed = 1;
-    double quality = 8, repeat_boost = 1.5, stability = 0.10;
+    double quality = 8, repeat_boost = 1.5, stability = 0.07;
     double frame_ms = 40;
-    int    min_hold = 1;
+    int    min_hold = 2;
     long   cyc_limit;
-    long   budget = A5V_DEFAULT_BUDGET;
+    long   budget = -1;             /* -1 = disco menos el audio */
+    int    audio_period = 443;
     uint8_t *idx = NULL;
     int i;
 
@@ -391,6 +394,7 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(a, "--no-audio"))             want_audio = 0;
         else if (!strcmp(a, "--min-hold") && has)      min_hold = atoi(argv[++i]);
+        else if (!strcmp(a, "--audio-period") && has)  audio_period = atoi(argv[++i]);
         else if (!strcmp(a, "--aspect") && has) {
             const char *v = argv[++i];
             if (!strcmp(v, "letterbox"))    aspect = ASPECT_LETTERBOX;
@@ -558,6 +562,19 @@ int main(int argc, char **argv)
                "%lu frames repetidos, audio intacto\n",
                nsrc / src.fps, nframes / A5_VIDEO_FPS,
                (unsigned long)(nframes - nsrc));
+
+    /* Presupuesto por defecto: el disco menos lo que se va a llevar el audio
+     * (Hito 5: fib4, 4 bits por muestra, a 3546895/periodo Hz exactos). Se
+     * reserva desde ahora para no volver a presupuestar el video contra un
+     * disco que en realidad tiene ~4 KB/s menos. */
+    if (budget < 0) {
+        double paula_hz = A5_CCK_PAL / audio_period;
+        long reserve = (long)ceil(nframes / A5_VIDEO_FPS * paula_hz / 2.0);
+        budget = A5V_DEFAULT_BUDGET - reserve;
+        printf("presupuesto: %ld bytes de video = %d de disco - %ld de audio "
+               "(fib4 a %.1f Hz)\n", budget, A5V_DEFAULT_BUDGET, reserve,
+               paula_hz);
+    }
 
     /* --- deteccion de cortes ---------------------------------------- */
     {
