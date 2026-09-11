@@ -498,6 +498,58 @@ global).
 
 ---
 
+## 2026-09-11 — Hito 3: doblado vertical por modulo, no por punteros
+
+**Decision:** el Copper duplica cada fila logica alternando `BPL1MOD` y
+`BPL2MOD` entre −40 y 0 en cada linea de pantalla. `CLAUDE.md` proponia
+reescribir los punteros de bitplane cada dos lineas y marcaba como duda el
+momento exacto del WAIT horizontal, con un framebuffer de 256 filas como
+alternativa si no salia estable.
+
+**Motivo:** el modulo se suma a los punteros al terminar el fetch de la
+linea, cerca de hpos $D8. Con −40, la linea siguiente vuelve a leer la misma
+fila; con 0 avanza. Escribirlo al principio de la linea (WAIT a hpos $06)
+deja **casi una linea entera de margen**: la escritura solo tiene que caer
+entre el fin del fetch de la linea anterior y el fin del de esta, ~200 color
+clocks. Reescribir punteros exige caer en el blanking horizontal, entre
+DDFSTOP y DDFSTRT, y son 6 escrituras por par de lineas con 3 planos (12 con
+4) contra 2 por linea. No hizo falta el alternativo de 256 filas.
+
+**Costo:** 256 lineas x (WAIT + 2 MOVE) = 3 KB de copper list por
+framebuffer, en Chip.
+
+**Verificado en WinUAE (A500, 68000 cycle-exact, KS 1.2):** el disco de
+prueba (`build.ps1 still`) carga el frame 182 de `final22.a5v` como un DELTA
+desde negro y lo muestra fijo. El framebuffer que dejo el decodificador en
+ensamblador es **identico byte a byte** al del decoder de referencia (15 360
+bytes), la paleta coincide y consumio exactamente los 6064 bytes del delta.
+En la captura la imagen sale entera, en bloques de 2x2, con la proporcion y
+los colores de la referencia. Queda confirmar en la A500 real (Hito 7).
+
+---
+
+## 2026-09-11 — Capturas: PrintWindow, nunca copiar la pantalla
+
+El primer intento de captura copiaba los pixeles de la pantalla en el
+rectangulo de la ventana de WinUAE, despues de pedirle a Windows que la
+trajera al frente. Windows no deja que un proceso de fondo robe el foco, asi
+que se capturo **otra aplicacion que estaba encima**. Esa captura se borro.
+
+Ahora `build.ps1` y `tools\shot.ps1` usan `PrintWindow` con
+`PW_RENDERFULLCONTENT`: la ventana de WinUAE se dibuja sola en un bitmap. No
+depende de que haya encima y no puede capturar nada que no sea el emulador.
+
+---
+
+## 2026-09-11 — Bug: leer IO_ERROR a traves de A1 despues de DoIO
+
+`memcheck.s` (Hito 0) leia `IO_ERROR(a1)` despues de `DoIO`. Por la
+convencion de exec, `a0/a1/d0/d1` no se preservan en una llamada: funcionaba
+por casualidad. Ahora se lee a traves de `a5`, que guarda el `IOStdReq` todo
+el programa. Salio al escribir el volcado del Hito 3, que hace lo mismo.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - **Velocidad de lectura de trackdisk.** `CLAUDE.md` estima 15–25 KB/s. Sin
@@ -506,4 +558,5 @@ global).
   el Hito 4, cuando exista la carga de verdad.
 - **Costo de decodificacion por frame.** Se mide en el Hito 4 y calibra el
   modelo de costo del encoder.
-- **WAIT horizontal del Copper para el doblado vertical.** Hito 3.
+- ~~WAIT horizontal del Copper para el doblado vertical.~~ Resuelto en el
+  Hito 3 con el truco del modulo (ver arriba).

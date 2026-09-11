@@ -42,6 +42,8 @@ es V36 (Kickstart 2.0) y no se puede usar.
 .\build.ps1              # ensambla, compila y genera work\a500vp.adf
 .\build.ps1 run          # ademas lo arranca en WinUAE y te deja mirarlo
 .\build.ps1 check        # lo arranca, lo cierra y te imprime la medicion
+.\build.ps1 still        # Hito 3: frame fijo en WinUAE, verificado byte a byte
+                         # (-Stream work\final22.a5v -Frame 182 por defecto)
 .\build.ps1 clean        # borra work\
 
 .\tools\shot.ps1         # arranca WinUAE y saca una captura a work\shot.png

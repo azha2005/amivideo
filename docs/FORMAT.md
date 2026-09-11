@@ -27,8 +27,14 @@ no es un volumen valido y esta bien.
 |---|---|
 | 0–1 | Bootblock (1024 bytes) |
 | 2 … | Reproductor, en sectores consecutivos |
-| … | Datos de video (cabecera + paquetes); ubicacion exacta en el Hito 4 |
-| 1759 | Sector de diagnostico del Hito 0 (`MEMR`) |
+| siguiente al reproductor … | Datos: bitstream (cabecera + paquetes) |
+| 1719–1758 | Solo en discos de prueba: volcado del framebuffer (Hito 3) |
+| 1759 | Solo en discos de prueba: sector de informacion (`MEMR` o `FBDM`) |
+
+Los datos empiezan en el primer sector libre despues del reproductor. `mkadf`
+escribe en la cabecera del reproductor donde quedaron. En los discos de
+prueba, `mkadf --reserve-tail 41` garantiza que los datos no pisen la zona
+de volcado; en el disco final esos sectores son para datos.
 
 ---
 
@@ -72,6 +78,23 @@ Entra con `A1` = `IOStdReq` de trackdisk.device (unidad 0, ya abierto) y
 
 Si falta memoria o falla la lectura, pone el borde en rojo y se queda quieto.
 El reproductor es **codigo independiente de posicion**.
+
+---
+
+## Cabecera del reproductor
+
+El reproductor (`player\player.s`) empieza con 16 bytes fijos:
+
+| Offset | Tamano | Contenido |
+|---|---|---|
+| 0 | 4 | `BRA.W` al codigo |
+| 4 | 4 | `"A5PL"` |
+| 8 | 4 | Offset en bytes, desde el principio del disco, donde empiezan los datos |
+| 12 | 4 | Longitud de los datos en bytes |
+
+`mkadf --data` exige el `"A5PL"` y escribe los dos campos. El reproductor
+los lee PC-relativos y carga los datos el mismo, con el `IOStdReq` que le
+pasa el bootblock.
 
 ---
 
@@ -203,3 +226,34 @@ seguido de `CMD_UPDATE`, para poder leer la medicion desde el PC.
 Si el disquete esta protegido contra escritura la grabacion falla sin
 consecuencias: el codigo de error de trackdisk se muestra en pantalla como
 `SAVE ERR` (`$1C` = `TDERR_WriteProt`) y los valores se leen igual del monitor.
+
+---
+
+## Volcado del Hito 3 (sectores 1719–1759)
+
+Lo escribe el reproductor despues de decodificar el primer paquete y antes
+de tomar el hardware, con `CMD_WRITE` + `CMD_UPDATE`.
+
+**Sectores 1719 en adelante:** el framebuffer tal cual esta en Chip RAM:
+`bitplanes` x 5120 bytes (40 bytes por fila de pantalla x 128 filas), plano
+0 primero. Son los bytes logicos ya doblados por la tabla. Con 3 planos
+ocupa los sectores 1719–1748.
+
+**Sector 1759:**
+
+| Offset | Tamano | Contenido |
+|---|---|---|
+| 0 | 4 | `"FBDM"` |
+| 4 | 4 | Bitplanes |
+| 8 | 4 | Direccion del framebuffer |
+| 12 | 4 | Direccion del copper list |
+| 16 | 4 | Bytes de delta que consumio el decodificador |
+| 20 | 4 | Error de trackdisk al volcar el framebuffer (0 = bien) |
+| 24 | 32 | Paleta leida del paquete: 16 palabras `$0RGB` |
+| 56 | 456 | Cero |
+
+`a500vp-dec --still K --still-out <f>` genera lo que tiene que dar:
+`<f>` (el frame K como un solo DELTA desde negro con su paleta), `<f>.fb`
+(el framebuffer esperado, mismo formato que el volcado) y `<f>.ppm` (la
+imagen de referencia). `build.ps1 still` compara el volcado contra `<f>.fb`
+byte a byte.
