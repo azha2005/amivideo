@@ -28,25 +28,26 @@
 #define A5V_DEFAULT_BUDGET  (901120 - 1024 - 16384)
 
 /* --- modelo de costo de decodificacion ---------------------------------
- * SIN CALIBRAR. Los numeros salen de contar ciclos del 68000 a mano sobre el
- * lazo previsto para el formato v2:
- *   por fila modificada : cargar la mascara de columnas y un puntero por
- *                         plano
- *   por columna recorrida (20 por fila): add.b/bcc sobre la mascara y
- *                         avanzar los punteros de plano
- *   por byte literal    : move.b (a0)+,d0 / add.w d0,d0 /
- *                         move.w 0(a5,d0.w),(aN)+   = 8 + 4 + 18 = 30
- *                         mas algo de contienda con el DMA de bitplanes.
- * Se calibra en el Hito 4 midiendo el reproductor de verdad en WinUAE
- * cycle-exact.
+ * CALIBRADO en el Hito 4 (2026-09-11). El disco de medicion cronometro con
+ * el haz de video los 253 deltas de final22.a5v, en WinUAE A500 68000
+ * cycle-exact con 3 bitplanes en pantalla. Minimos cuadrados:
+ *
+ *   ciclos = 5580 + 851,6 x filas + 177,5 x columnas
+ *            (R2 = 1,0000, residuo maximo 0,14 ms)
+ *
+ * La fila cara es el recorrido de los 20 bits de la mascara de columnas:
+ * ~36 ciclos por columna, este marcada o no. Por columna marcada, lo que se
+ * midio es la suma de la columna y sus 3 bytes; el reparto entre las dos
+ * (22 + 3 x 52) sale de contar instrucciones, no de la medicion. Con otra
+ * cantidad de planos hay que volver a medir.
  */
 #define A5_CPU_HZ            7093790.0
-#define A5_CYC_FRAME         2000
-#define A5_CYC_ROW           80
-#define A5_CYC_COLSCAN       14
-#define A5_CYC_COL           20
-#define A5_CYC_BYTE          36
+#define A5_CYC_FRAME         5580
+#define A5_CYC_ROW           852
+#define A5_CYC_COL           22
+#define A5_CYC_BYTE          52
 #define A5_FRAME_BUDGET_CYC  ((long)(A5_CPU_HZ * 0.040))
+#define A5_CYC_PER_VBL       (A5_CPU_HZ / A5_VBL_HZ)   /* ~142103 */
 
 /* --- buffer de bytes que crece ----------------------------------------- */
 typedef struct { uint8_t *p; size_t len, cap; } A5Buf;

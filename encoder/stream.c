@@ -89,7 +89,7 @@ void a5_depack_row(const uint8_t *planar, int planes, uint8_t *idx_row)
 long a5_delta_cost(const A5DeltaStats *st)
 {
     return A5_CYC_FRAME
-         + (long)st->rows  * (A5_CYC_ROW + A5_ROWBYTES * A5_CYC_COLSCAN)
+         + (long)st->rows  * A5_CYC_ROW
          + (long)st->cols  * A5_CYC_COL
          + (long)st->bytes * A5_CYC_BYTE;
 }

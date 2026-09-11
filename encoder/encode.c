@@ -48,7 +48,11 @@ typedef struct {
     int    maxpacket_frame;
     long   maxcycles;
     int    maxcycles_frame;
-    int    over_budget;     /* frames que pasan los 40 ms estimados */
+    int    over_budget;     /* frames que pasan el tope fijo (--frame-ms) */
+    int    degraded;        /* frames degradados para no llegar tarde */
+    int    late_frames;     /* frames que el reproductor va a mostrar tarde */
+    int    max_late;        /* mayor atraso previsto, en VBL */
+    int    max_late_frame;
     double err_sum;         /* error perceptual medio contra el frame ideal */
     long   bad_pixels;      /* pixeles activos con error visible, sumados */
     uint32_t *crc;          /* uno por frame, del buffer visible */
@@ -145,6 +149,15 @@ static void apply_quality(uint8_t *target, const uint8_t *hidden,
     }
 }
 
+/* VBL que llega tarde un delta que empieza a decodificarse en start y cuesta
+ * cost ciclos, si le toca verse en due. due esta sobre la grilla de VBL. */
+static int late_vbls(double start, long cost, double due, double P)
+{
+    double end = start + (double)cost;
+    if (end <= due) return 0;
+    return (int)ceil((end - due) / P);
+}
+
 static void put_packet(A5Stream *st, int op, const A5Palette *pal, int ncolors,
                        const A5Buf *video, const uint8_t *audio,
                        size_t audio_len)
@@ -184,7 +197,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
                          const Scene *scenes, int nscenes, int planes,
                          int ncolors, int y0, int y1,
                          double pixel_thr, double repeat_boost, long cyc_limit,
-                         int min_hold)
+                         int min_hold, int max_late)
 {
     size_t fsz = (size_t)A5_W * A5_H;
     uint8_t *vis = calloc(fsz, 1);
@@ -195,6 +208,10 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
     int s = 0;
     const A5Palette *vispal = NULL;
     size_t last_delta = 0;
+    /* Linea de tiempo del reproductor, en ciclos de CPU, con el origen en el
+     * VBL del frame 0. El reproductor empieza a decodificar 2 VBL antes. */
+    double P = A5_CYC_PER_VBL;
+    double t_free = -2.0 * P;
 
     if (!vis || !hid || !tgt) die("sin memoria");
     memset(st, 0, sizeof *st);
@@ -209,21 +226,13 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         int newscene;
         A5DeltaStats ds = {0, 0, 0, 0};
         double thr = pixel_thr;
-        int attempt;
+        double due = 2.0 * (double)n * P;    /* VBL en que se ve este frame */
+        int attempt, late = 0;
 
         while (s + 1 < nscenes && (int)n >= scenes[s + 1].start) s++;
         pal = &scenes[s].pal;
         newscene = ((int)n == scenes[s].start);
 
-        /* Repeticion: mostrar de nuevo lo que ya esta en pantalla. No se
-         * puede si cambia la paleta, porque la paleta viaja con el delta.
-         *
-         * El criterio es el mismo que el de la calidad con perdida, aplicado
-         * contra el buffer VISIBLE: si a esta calidad no queda nada que valga
-         * la pena actualizar, el frame se repite. Tenerlo como umbral aparte
-         * y fijo era un error: al subir la perdida, el buffer visible se
-         * alejaba del ideal y las repeticiones desaparecian justo cuando mas
-         * falta hacian. */
         /* Tope de cadencia: la imagen se actualiza como mucho cada min_hold
          * huecos. Un corte de escena siempre pasa. */
         if (!newscene && vispal == pal && min_hold > 1 &&
@@ -236,6 +245,15 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
             continue;
         }
 
+        /* Repeticion: mostrar de nuevo lo que ya esta en pantalla. No se
+         * puede si cambia la paleta, porque la paleta viaja con el delta.
+         *
+         * El criterio es el mismo que el de la calidad con perdida, aplicado
+         * contra el buffer VISIBLE: si a esta calidad no queda nada que valga
+         * la pena actualizar, el frame se repite. Tenerlo como umbral aparte
+         * y fijo era un error: al subir la perdida, el buffer visible se
+         * alejaba del ideal y las repeticiones desaparecian justo cuando mas
+         * falta hacian. */
         if (!newscene && vispal == pal) {
             memcpy(tgt, ideal, fsz);
             apply_quality(tgt, vis, pal, y0, y1, thr * repeat_boost,
@@ -251,22 +269,42 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         }
 
         /* Delta contra el buffer oculto, que es el penultimo frame distinto.
-         * Si el frame no entra en los 40 ms se lo degrada subiendo el umbral;
-         * mas de eso (repartirlo en frames siguientes) queda para cuando el
-         * modelo de costo este calibrado. */
+         *
+         * Linea de tiempo del reproductor, medida en el Hito 4: el delta se
+         * empieza a decodificar cuando el intercambio anterior libera el
+         * buffer oculto (t_free) y tiene que estar listo para el VBL en que
+         * le toca verse. Si no llega, se ve tarde y las repeticiones que
+         * siguen absorben el atraso. Se degrada (subiendo el umbral) solo si
+         * se pasaria de max_late VBL: un frame degradado deja salpicado, que
+         * se ve bastante peor que un frame que llega 20 o 40 ms tarde. */
         for (attempt = 0; attempt < 6; attempt++) {
+            int capped;
             memcpy(tgt, ideal, fsz);
             apply_quality(tgt, hid, pal, y0, y1, thr, thr);
             video.len = 0;
             a5_delta_encode(&video, hid, tgt, planes, &ds);
-            if (!cyc_limit || ds.cycles <= cyc_limit) break;
+            late = late_vbls(t_free, ds.cycles, due, P);
+            capped = !cyc_limit || ds.cycles <= cyc_limit;
+            if (capped && late <= max_late) break;
+            /* Si ni un delta vacio llega a tiempo, degradar no arregla nada. */
+            if (capped && late_vbls(t_free, A5_CYC_FRAME, due, P) > max_late)
+                break;
             thr = thr > 0 ? thr * 2 : 0.01;
         }
+        if (attempt > 0) st->degraded++;
         if (cyc_limit && ds.cycles > cyc_limit) st->over_budget++;
         if (ds.cycles > st->maxcycles) {
             st->maxcycles = ds.cycles;
             st->maxcycles_frame = (int)n;
         }
+        if (late > 0) {
+            st->late_frames++;
+            if (late > st->max_late) {
+                st->max_late = late;
+                st->max_late_frame = (int)n;
+            }
+        }
+        t_free = due + late * P;              /* el intercambio de este delta */
 
         put_packet(st, A5V_OP_DELTA, newscene ? pal : NULL, ncolors,
                    &video, NULL, 0);
@@ -304,8 +342,11 @@ static void usage(void)
 "  --audio-period N        periodo de Paula del audio (443 = 8006,5 Hz)\n"
 "  --repeat-boost F        cuanto mas permisivo es repetir que actualizar (1.5)\n"
 "  --stability F           histeresis temporal del cuantizador (0.07)\n"
-"  --frame-ms F            tope estimado de decodificacion por frame;\n"
-"                          0 = sin tope (40)\n"
+"  --max-late N            VBL de atraso que se toleran antes de degradar\n"
+"                          un frame (2); el atraso se simula con el modelo\n"
+"                          de costo medido en el Hito 4\n"
+"  --frame-ms F            tope fijo de decodificacion por frame, ademas de\n"
+"                          la simulacion; 0 = sin tope (0)\n"
 "  --min-hold N            actualizar la imagen como mucho cada N huecos;\n"
 "                          2 = 12,5 fps de imagenes distintas (2)\n"
 "  --start SEG             desde donde cortar la fuente (0)\n"
@@ -341,8 +382,9 @@ int main(int argc, char **argv)
     double scene_thr = 0.12;
     uint32_t seed = 1;
     double quality = 8, repeat_boost = 1.5, stability = 0.07;
-    double frame_ms = 40;
+    double frame_ms = 0;
     int    min_hold = 2;
+    int    max_late = 2;
     long   cyc_limit;
     long   budget = -1;             /* -1 = disco menos el audio */
     int    audio_period = 443;
@@ -394,6 +436,7 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(a, "--no-audio"))             want_audio = 0;
         else if (!strcmp(a, "--min-hold") && has)      min_hold = atoi(argv[++i]);
+        else if (!strcmp(a, "--max-late") && has)      max_late = atoi(argv[++i]);
         else if (!strcmp(a, "--audio-period") && has)  audio_period = atoi(argv[++i]);
         else if (!strcmp(a, "--aspect") && has) {
             const char *v = argv[++i];
@@ -756,7 +799,7 @@ int main(int argc, char **argv)
         int pass = 0;
 
         build_stream(&st, idx, nframes, scenes, nscenes, planes, ncolors,
-                     y0, y1, lo, repeat_boost, cyc_limit, min_hold);
+                     y0, y1, lo, repeat_boost, cyc_limit, min_hold, max_late);
         total = A5V_HEADER_SIZE + st.buf.len;
         printf("\nbitstream  : calidad %.4f -> %lu bytes\n", lo,
                (unsigned long)total);
@@ -767,7 +810,7 @@ int main(int argc, char **argv)
                 hi *= 2;
                 a5buf_free(&st.buf); free(st.crc);
                 build_stream(&st, idx, nframes, scenes, nscenes, planes,
-                             ncolors, y0, y1, hi, repeat_boost, cyc_limit, min_hold);
+                             ncolors, y0, y1, hi, repeat_boost, cyc_limit, min_hold, max_late);
                 total = A5V_HEADER_SIZE + st.buf.len;
                 printf("             calidad %.4f -> %lu bytes\n", hi,
                        (unsigned long)total);
@@ -777,7 +820,7 @@ int main(int argc, char **argv)
                 double mid = (lo + hi) / 2;
                 A5Stream t2;
                 build_stream(&t2, idx, nframes, scenes, nscenes, planes,
-                             ncolors, y0, y1, mid, repeat_boost, cyc_limit, min_hold);
+                             ncolors, y0, y1, mid, repeat_boost, cyc_limit, min_hold, max_late);
                 if (A5V_HEADER_SIZE + t2.buf.len <= (size_t)budget) {
                     a5buf_free(&st.buf); free(st.crc);
                     st = t2; hi = mid; total = A5V_HEADER_SIZE + st.buf.len;
@@ -835,14 +878,17 @@ int main(int argc, char **argv)
                st.maxpacket_frame);
         printf("tasa       : %.1f KB/s de video\n",
                st.buf.len / 1024.0 / (nframes / A5_VIDEO_FPS));
-        printf("costo est. : peor frame %ld ciclos = %.1f ms (limite %ld = "
-               "40 ms), frame %d\n",
+        printf("decodif.   : peor delta %ld ciclos = %.1f ms (frame %d), "
+               "con el modelo medido\n",
                st.maxcycles, st.maxcycles * 1000.0 / A5_CPU_HZ,
-               cyc_limit, st.maxcycles_frame);
+               st.maxcycles_frame);
+        printf("tiempo real: %d frames se van a ver tarde, el peor por %d VBL "
+               "(frame %d); %d degradados para no pasar de %d VBL\n",
+               st.late_frames, st.max_late, st.max_late_frame, st.degraded,
+               max_late);
         if (st.over_budget)
-            printf("  AVISO: %d frames pasan los 40 ms estimados. El modelo de "
-                   "costo\n         esta SIN CALIBRAR; se calibra en el "
-                   "Hito 4.\n", st.over_budget);
+            printf("  AVISO: %d frames pasan el tope fijo de %.0f ms\n",
+                   st.over_budget, frame_ms);
         printf("error final: %.4f (contra el frame cuantizado ideal)\n",
                st.err_sum / nframes);
         printf("salpicado  : %.2f%% de los pixeles activos con error "
