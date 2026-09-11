@@ -69,8 +69,9 @@ Rutas pisables: `-Vasm`, `-Gcc`, `-WinUAE`, `-Rom`, `-Timeout`.
 
 ```powershell
 # bitstream y disco de los primeros 22 s. Los defaults son los parametros
-# elegidos en el Hito 2 (8 colores, realce 1.2, hold 2, histeresis 0.07) y
-# audio fib4 a 8006,5 Hz. Con --adf el presupuesto es exactamente lo que
+# elegidos en el Hito 2 (8 colores, realce 1.2, hold 2, histeresis 0.07),
+# audio fib4 a 8006,5 Hz (Hito 5) y paleta en franjas de 16 filas con
+# --band-snap 0.04 (Hito 6). Con --adf el presupuesto es exactamente lo que
 # queda en el disco despues del reproductor, audio incluido.
 .\work\a500vp-enc.exe --in "C:\ruta\al\opening.mp4" --duration 22 `
     --out work\video.a5v --adf work\a500vp.adf

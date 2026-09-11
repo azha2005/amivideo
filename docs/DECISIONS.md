@@ -831,6 +831,116 @@ Hoy no hace falta, porque no cambia el atraso previsto; queda anotado.
 
 ---
 
+## 2026-09-11 — Hito 6: paleta por franjas, medida
+
+**Que es.** El area activa se parte en franjas horizontales de N filas
+logicas, y cada una tiene su paleta de 8 colores por escena. El negro (color
+0) es comun a todas, porque tambien es el color del borde. El Copper cambia
+los colores 1–7 al principio de la primera linea de cada franja. Formato v4
+(`FORMAT.md`).
+
+**Por que entra en el Copper.** Cada linea de pantalla ya tiene un WAIT en
+hpos $06 y dos MOVE de modulo (el doblado vertical del Hito 3). En la linea
+donde empieza una franja van 7 MOVE de color entre el WAIT y los de modulo:
+9 MOVE son 36 color clocks, terminan hacia el color clock 44, y la imagen
+empieza en el 64. Con 16 colores serian 17 MOVE, ~74 color clocks, y los
+ultimos colores cambiarian con la linea ya empezada: por eso el formato no
+admite franjas con 4 planos.
+
+**Medido** con el opening de 22 s y el presupuesto del disco. Hace falta
+una metrica nueva, el error de lo que se ve **contra la fuente**: el error
+contra el frame cuantizado ideal no sirve para comparar paletas distintas,
+porque el ideal cambia con la paleta.
+
+| franjas de | bytes a calidad 8 | umbral final | pixeles a > 0,10 del original | error medio |
+|---|---|---|---|---|
+| (una paleta) | 862 380 | 0,012 | 12,48 % | 0,0584 |
+| 48 filas | 896 388 | 0,045 | 11,14 % | 0,0564 |
+| 32 | 892 132 | 0,036 | 10,22 % | 0,0546 |
+| 24 | 904 712 | 0,069 | 10,11 % | 0,0541 |
+| **16** | 889 744 | 0,012 | **9,62 %** | 0,0535 |
+| 12 | 912 110 | 0,074 | 9,95 % | 0,0541 |
+| 8 | 889 906 | 0,018 | 9,64 % | 0,0528 |
+| 4 | 913 468 | 0,074 | 10,04 % | 0,0538 |
+| 1 | 921 744 | 0,078 | 10,19 % | 0,0540 |
+
+Casi toda la ganancia llega con franjas de 16. Mas finas no mejoran: cuestan
+mas bytes, y el control de tasa lo paga con perdida. Con 16 filas son 6
+franjas, 96 bytes de paleta por corte de escena y 35 MOVE mas de Copper.
+
+**Costuras.** A la vista, las franjas recuperan colores que con una paleta
+se perdian (el pelo castano y el vestido de Winry, que con una sola paleta
+salen grises). Pero dejan rayas horizontales en las zonas lisas: el fondo
+rojo del titulo cae en un tono en una franja y en otro casi igual en la de
+abajo. Juntar histogramas de franjas vecinas (`--band-overlap`) no las
+quita. Lo que funciona es `--band-snap`: un color a menos de δ de uno de la
+franja de arriba pasa a ser exactamente ese.
+
+| δ | pixeles a > 0,10 | bytes | a la vista |
+|---|---|---|---|
+| 0 | 9,62 % | 889 744 | rayas en el fondo del titulo |
+| **0,04** | 10,04 % | 889 576 | la raya grande desaparece |
+| 0,06 | 11,17 % | 873 456 | liso, pero la cara pierde color |
+| 0,08 | 11,81 % | 874 544 | vuelve al gris de una paleta |
+
+**Decision:** franjas de 16 filas con δ = 0,04 por defecto. Conserva casi
+toda la mejora (de 12,5 % a 10,0 % de pixeles lejos del original) y entra en
+el disco practicamente sin perdida: la tabla de franjas agrando el
+reproductor un sector, y el control de tasa subio el umbral de 0,012 a
+0,0128, sin cambio medible en el error ni en el salpicado. `--band-rows 0`
+vuelve a la paleta unica, y el stream sale byte por byte igual al del
+Hito 5, salvo el numero de version.
+
+**En la Amiga** (disco de medicion, WinUAE A500 cycle-exact, KS 1.2): carga
+de 888 954 bytes en 48,3 s; 1100 VBL para 1100; 1 frame tarde por 2 VBL, el
+mismo que predice el encoder; el modelo de costo predice el 99,9 % de lo
+medido y su ajuste sin el audio (`4435 + 878,1 x filas + 177,3 x columnas`)
+es el mismo del Hito 5. Las franjas no le cambian el costo al reproductor:
+las paletas se escriben solo en los cortes de escena (~50 palabras) y los 35
+MOVE de Copper por frame no se notan.
+
+**Verificacion.** El decoder arma, con la misma receta que `build_copper` +
+`write_palette`, el copper list que tendria que tener el reproductor, y lo
+compara byte por byte con el que vuelca el disco de prueba
+(`build.ps1 still`): 3312 bytes, 6 franjas, identico. La captura de WinUAE
+muestra los cambios de paleta sin cortes a mitad de linea.
+
+---
+
+## 2026-09-11 — Dither ordenado: medido, queda apagado
+
+`--dither bayer2|bayer4` existia desde el Hito 1; ahora se midio con el
+bitstream real. Cuesta ~5 KB (868 412 y 867 224 bytes contra 862 380) y el
+error contra la fuente no mejora (0,0588 contra 0,0584). A la vista, con la
+fuerza por defecto casi no se distingue. Queda opcional y apagado, como
+pedia `CLAUDE.md`.
+
+---
+
+## 2026-09-11 — Control de tasa: ahora tambien baja la perdida
+
+Si el stream entra y sobra disco, el encoder baja la perdida (busqueda
+binaria entre 0 y la calidad pedida) para usarlo. Con el opening no cambia
+nada: el umbral de `--quality 8` (0,012) ya es sin perdida, porque dos
+colores RGB444 distintos estan siempre mas lejos que eso, y con umbral 0 sale
+el mismo stream. Si alguna vez sobra disco sin perdida, lo que queda para
+gastar es la histeresis del cuantizador (`--stability`), que es la que mas
+bytes ahorra; queda anotado.
+
+---
+
+## 2026-09-11 — Dos bugs de este hito
+
+- `frame_crc` del decoder serializaba las paletas en un buffer de 32 bytes
+  (una paleta de 16 colores). Con franjas se desbordaba y los CRC no
+  coincidian. La verificacion lo detecto en los tres streams de prueba con
+  franjas; los de una paleta pasaban.
+- El disco de prueba volcaba el copper list con un segundo `DoIO` y perdia
+  el error del primero, porque `DoIO` no preserva d1. Solo afectaba al
+  informe.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
