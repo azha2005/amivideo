@@ -73,7 +73,7 @@ V_START     equ 92      ; l  VBL en el que se ve el frame 0
 V_ENDVBL    equ 96      ; l
 V_IOREQ     equ 100     ; l
 V_FBSIZE    equ 104     ; l
-V_NCOLM1    equ 108     ; w  colores - 1
+V_PALBYTES  equ 108     ; w  bytes de paleta de un paquete (franjas x colores x 2)
 V_STAMP0    equ 110     ; 8  VBL.l, linea.w, color clock.w
 V_STAMP1    equ 118     ; 8
 V_MAXDEC    equ 126     ; l  peor decodificacion, en color clocks
@@ -96,7 +96,8 @@ V_OLDINT4   equ 192     ; l  vector de nivel 4 del sistema
 V_AFEND     equ 196     ; 8  estampa del final del ultimo llenado
 V_AFSUM     equ 204     ; l  color clocks llenando buffers, sumados
 V_AFMAX     equ 208     ; l  el llenado mas largo
-VARS_SIZE   equ 212
+V_PALPTR    equ 212     ; l  paletas vigentes, dentro de su paquete
+VARS_SIZE   equ 216
 
 ;----------------------------------------------------------------------
 ; Cabecera del reproductor. mkadf escribe donde quedaron los datos.
@@ -140,7 +141,7 @@ entry:
         lea     header(pc),a0
         cmp.l   #$41355650,(a0)               ; "A5VP"
         bne     badhdr
-        cmp.w   #3,4(a0)                      ; version de formato
+        cmp.w   #4,4(a0)                      ; version de formato
         bne     badhdr
         moveq   #0,d6
         move.b  12(a0),d6                     ; d6 = bitplanes
@@ -149,10 +150,11 @@ entry:
         bhi     badhdr
         tst.l   20(a0)                        ; al menos un paquete
         beq     badhdr
-        moveq   #1,d0
-        lsl.w   d6,d0
-        subq.w  #1,d0
-        move.w  d0,V_NCOLM1(a4)
+        bsr     set_bands                     ; franjas de paleta
+        tst.w   d0
+        beq     badhdr                        ; alguna que el Copper no puede
+        add.w   d0,d0
+        move.w  d0,V_PALBYTES(a4)
 
         moveq   #0,d0                         ; audio
         move.b  28(a0),d0
@@ -356,8 +358,7 @@ entry:
         ;--- copper lists de reproduccion, en negro ----------------
         lea     dbltab(pc),a3
         bsr     build_table
-        lea     palbuf(pc),a1                 ; ceros hasta el primer delta
-        move.l  V_COP(a4),a0
+        move.l  V_COP(a4),a0                  ; en negro hasta el primer delta
         move.l  V_FB(a4),a2
         bsr     build_copper
         move.l  V_COP+4(a4),a0
@@ -443,12 +444,10 @@ entry:
         bne.s   .wait
 
         lea     6(a5),a0
-        btst    #0,3(a5)                      ; paleta nueva
-        beq.s   .nopal
-        lea     palbuf(pc),a1
-        move.w  V_NCOLM1(a4),d0
-.cpal:  move.w  (a0)+,(a1)+
-        dbf     d0,.cpal
+        btst    #0,3(a5)                      ; paleta nueva: se usa donde
+        beq.s   .nopal                        ; esta, el paquete no se mueve
+        move.l  a0,V_PALPTR(a4)
+        add.w   V_PALBYTES(a4),a0
         move.w  #1,V_DIRTY(a4)
         move.w  #1,V_DIRTY+2(a4)
 .nopal: add.w   4(a5),a0                      ; saltar el audio
@@ -461,7 +460,7 @@ entry:
         clr.w   V_DIRTY(a4,d1.w)
         add.w   d1,d1                         ; indice de longword
         move.l  V_COP(a4,d1.w),a0
-        lea     palbuf(pc),a1
+        move.l  V_PALPTR(a4),a1
         bsr     write_palette
         bra.s   .fb
 .clean: add.w   d1,d1
@@ -728,10 +727,7 @@ audio_nextpkt:
         lea     6(a2),a1
         btst    #0,3(a2)                      ; el audio va despues de la paleta
         beq.s   .nopal
-        move.w  V_NCOLM1(a4),d0
-        addq.w  #1,d0
-        add.w   d0,d0
-        add.w   d0,a1
+        add.w   V_PALBYTES(a4),a1
 .nopal: moveq   #0,d0
         move.w  (a2),d0
         add.l   d0,a2
@@ -1005,7 +1001,6 @@ gfxname:    dc.b    "graphics.library",0
         even
 header:     ds.b    HDR_SIZE
 vars:       ds.b    VARS_SIZE
-palbuf:     ds.w    16
 dbltab:     ds.w    256
 fibtab:     dc.b    -34,-21,-13,-8,-5,-3,-2,-1,0,1,2,3,5,8,13,21
         even

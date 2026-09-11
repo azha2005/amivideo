@@ -79,7 +79,15 @@ apply_delta:
 
 ;----------------------------------------------------------------------
 ; build_copper - arma un copper list de reproduccion.
-;   a0 = copper list, a1 = paleta, a2 = framebuffer, d6 = bitplanes
+;   a0 = copper list, a2 = framebuffer, d6 = bitplanes
+; Los colores quedan en negro: los pone write_palette. Usa las franjas
+; que fijo set_bands, y anota en vc_bandoff donde quedo cada una.
+;
+; Franjas de paleta: en la primera linea de pantalla de cada franja, el
+; WAIT de hpos $06 sigue con los MOVE de COLOR01..n-1 y despues con los de
+; modulo. Con 8 colores son 9 MOVE (36 color clocks): terminan hacia el
+; color clock 44, y la imagen empieza en el 64. El color 0 no se toca: es
+; tambien el del borde.
 ;
 ; Doblado vertical por modulo: en cada linea de pantalla se alterna
 ; BPLxMOD entre -40 y 0. El modulo se suma al terminar el fetch de la linea
@@ -88,7 +96,8 @@ apply_delta:
 ; linea (hpos $06) deja casi una linea entera de margen. Ver DECISIONS.md.
 ;----------------------------------------------------------------------
 build_copper:
-        movem.l d0-d3/a0-a1,-(sp)
+        movem.l d0-d5/a0-a3,-(sp)
+        move.l  a0,a3                         ; a3 = principio del copper list
         move.l  #$008e2c81,(a0)+              ; DIWSTRT
         move.l  #$00902cc1,(a0)+              ; DIWSTOP (256 lineas)
         move.l  #$00920038,(a0)+              ; DDFSTRT
@@ -113,12 +122,17 @@ build_copper:
         add.l   #PLANE_BYTES,d0
         dbf     d2,.bp
 
-        moveq   #1,d2                         ; paleta (COP_PAL_BASE + 8*planos)
+        lea     vc_bandoff(pc),a1             ; la franja 0 va en la cabecera
+        move.l  a0,d0                         ; (COP_PAL_BASE + 8*planos)
+        sub.l   a3,d0
+        addq.w  #2,d0
+        move.w  d0,(a1)
+        moveq   #1,d2                         ; COLOR00..n-1, en negro
         lsl.w   d6,d2
         subq.w  #1,d2
         move.w  #$0180,d1
 .pal:   move.w  d1,(a0)+
-        move.w  (a1)+,(a0)+
+        clr.w   (a0)+
         addq.w  #2,d1
         dbf     d2,.pal
 
@@ -128,6 +142,15 @@ build_copper:
         move.w  #$0100,(a0)+
         move.w  d0,(a0)+
 
+        moveq   #1,d5                         ; d5 = proxima franja
+        move.w  #$7fff,d4                     ; d4 = su primera linea
+        cmp.w   vc_nbands(pc),d5
+        bhs.s   .nob
+        move.w  vc_y0(pc),d4
+        add.w   vc_brows(pc),d4
+        add.w   d4,d4
+        add.w   #DIW_FIRST,d4
+.nob:
         move.w  #DIW_FIRST,d3
 .line:  cmp.w   #$100,d3                      ; el Copper cuenta 8 bits de linea
         bne.s   .nowrap
@@ -138,6 +161,31 @@ build_copper:
         or.w    #$0007,d0
         move.w  d0,(a0)+                      ; WAIT linea, hpos $06
         move.w  #$fffe,(a0)+
+        cmp.w   d4,d3                         ; empieza una franja
+        bne.s   .nocol
+        move.l  a0,d0
+        sub.l   a3,d0
+        addq.w  #2,d0
+        move.w  d5,d1
+        add.w   d1,d1
+        move.w  d0,0(a1,d1.w)                 ; offset del valor de COLOR01
+        moveq   #1,d2
+        lsl.w   d6,d2
+        subq.w  #2,d2                         ; n-1 colores
+        move.w  #$0182,d1
+.bc:    move.w  d1,(a0)+
+        clr.w   (a0)+
+        addq.w  #2,d1
+        dbf     d2,.bc
+        addq.w  #1,d5                         ; y la franja siguiente
+        move.w  #$7fff,d0
+        cmp.w   vc_nbands(pc),d5
+        bhs.s   .setnx
+        move.w  vc_brows(pc),d0
+        add.w   d0,d0
+        add.w   d4,d0
+.setnx: move.w  d0,d4
+.nocol:
         moveq   #-40,d1                       ; primera de cada par: repetir
         btst    #0,d3                         ; DIW_FIRST es par
         beq.s   .rep
@@ -151,23 +199,90 @@ build_copper:
         bne.s   .line
 
         move.l  #$fffffffe,(a0)+              ; fin
-        movem.l (sp)+,d0-d3/a0-a1
+        movem.l (sp)+,d0-d5/a0-a3
         rts
 
 ;----------------------------------------------------------------------
-; write_palette - copia una paleta a un copper list ya armado.
-;   a0 = copper list, a1 = paleta (hasta 16 palabras), d6 = bitplanes
+; write_palette - copia las paletas de todas las franjas a un copper list
+; ya armado por build_copper.
+;   a0 = copper list, a1 = paletas (franjas x colores palabras, como vienen
+;   en el paquete). El color 0 se escribe solo en la cabecera: es el mismo
+;   en todas las franjas (FORMAT.md).
 ;----------------------------------------------------------------------
 write_palette:
-        movem.l d0/a0-a1,-(sp)
-        move.w  d6,d0
-        lsl.w   #3,d0                         ; 8 bytes de punteros por plano
-        lea     COP_PAL_BASE+2(a0,d0.w),a0    ; valor del primer MOVE COLOR
-        moveq   #1,d0
-        lsl.w   d6,d0
-        subq.w  #1,d0
-.c:     move.w  (a1)+,(a0)
-        addq.l  #4,a0
-        dbf     d0,.c
-        movem.l (sp)+,d0/a0-a1
+        movem.l d0-d3/a1-a3,-(sp)
+        lea     vc_bandoff(pc),a2
+        move.w  vc_ncolors(pc),d1
+        move.w  (a2)+,d0                      ; franja 0: en la cabecera
+        lea     0(a0,d0.w),a3
+        move.w  d1,d2
+        subq.w  #1,d2
+.c0:    move.w  (a1)+,(a3)
+        addq.l  #4,a3
+        dbf     d2,.c0
+        move.w  vc_nbands(pc),d3
+        subq.w  #2,d3                         ; franjas 1..
+        bmi.s   .done
+.band:  move.w  (a2)+,d0
+        lea     0(a0,d0.w),a3
+        addq.l  #2,a1                         ; sin el color 0
+        move.w  d1,d2
+        subq.w  #2,d2
+.cb:    move.w  (a1)+,(a3)
+        addq.l  #4,a3
+        dbf     d2,.cb
+        dbf     d3,.band
+.done:  movem.l (sp)+,d0-d3/a1-a3
         rts
+
+;----------------------------------------------------------------------
+; set_bands - lee las franjas de paleta de la cabecera del bitstream.
+;   a0 = cabecera. Devuelve d0 = palabras de paleta de un paquete
+;   (franjas x colores), o 0 si el Copper no puede con lo que pide.
+;----------------------------------------------------------------------
+set_bands:
+        movem.l d1-d3/a1,-(sp)
+        lea     vc_brows(pc),a1
+        moveq   #0,d1
+        move.b  29(a0),d1                     ; filas por franja
+        move.w  d1,(a1)
+        move.w  16(a0),d2                     ; y0
+        move.w  d2,vc_y0-vc_brows(a1)
+        moveq   #1,d0                         ; franjas
+        tst.w   d1
+        beq.s   .one
+        move.w  18(a0),d3                     ; y1
+        sub.w   d2,d3                         ; filas activas
+        ble.s   .one
+        add.w   d1,d3
+        subq.w  #1,d3
+        ext.l   d3
+        divu    d1,d3                         ; hacia arriba
+        move.w  d3,d0
+.one:   move.w  d0,vc_nbands-vc_brows(a1)
+        moveq   #0,d2
+        move.b  13(a0),d2                     ; colores
+        move.w  d2,vc_ncolors-vc_brows(a1)
+        cmp.w   #1,d0
+        beq.s   .ok
+        cmp.w   #MAX_BANDS,d0
+        bhi.s   .bad
+        cmp.w   #8,d2                         ; 16 colores: no llega
+        bhi.s   .bad
+.ok:    mulu    d2,d0
+        bra.s   .out
+.bad:   moveq   #0,d0
+.out:   movem.l (sp)+,d1-d3/a1
+        rts
+
+;----------------------------------------------------------------------
+; Estado de las franjas de paleta (lo fija set_bands, lo usa todo lo
+; demas). Los dos copper lists tienen la misma forma: una sola tabla.
+;----------------------------------------------------------------------
+        even
+vc_brows:   dc.w    0                         ; filas logicas por franja
+vc_y0:      dc.w    0                         ; primera fila activa
+vc_nbands:  dc.w    1                         ; franjas
+vc_ncolors: dc.w    8                         ; colores por franja
+vc_bandoff: ds.w    MAX_BANDS                 ; offset del primer valor de
+                                              ; color de cada franja

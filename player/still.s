@@ -19,7 +19,8 @@
         include "exec.i"
         include "video.i"
 
-DUMP_SECTOR   equ 1719                ; volcado del framebuffer (hasta 40 sect.)
+DUMP_SECTOR   equ 1680                ; volcado del framebuffer (hasta 40 sect.)
+COPDUMP_SECTOR equ 1720               ; volcado del copper list (16 sectores)
 INFO_SECTOR   equ 1759
 
 COL_LOAD      equ $0f80               ; naranja: cargando
@@ -66,7 +67,7 @@ entry:
         ;--- cabecera del bitstream ---------------------------------
         cmp.l   #$41355650,(a3)               ; "A5VP"
         bne     badhdr
-        cmp.w   #3,4(a3)                      ; version de formato
+        cmp.w   #4,4(a3)                      ; version de formato
         bne     badhdr
         moveq   #0,d6
         move.b  12(a3),d6                     ; bitplanes
@@ -75,6 +76,13 @@ entry:
         bhi     badhdr
         tst.l   20(a3)                        ; al menos un paquete
         beq     badhdr
+        move.l  a3,a0                         ; franjas de paleta
+        bsr     set_bands
+        tst.w   d0
+        beq     badhdr
+        add.w   d0,d0
+        lea     v_palbytes(pc),a1
+        move.w  d0,(a1)
 
         ;--- primer paquete -----------------------------------------
         lea     32(a3),a0
@@ -84,12 +92,9 @@ entry:
         addq.l  #6,a0
         btst    #0,d5
         beq.s   .nopal
-        lea     palbuf(pc),a1
-        moveq   #1,d0
-        lsl.w   d6,d0
-        subq.w  #1,d0
-.pal:   move.w  (a0)+,(a1)+
-        dbf     d0,.pal
+        lea     v_palptr(pc),a1               ; la paleta se usa donde esta
+        move.l  a0,(a1)
+        add.w   v_palbytes(pc),a0
 .nopal:
         add.w   d3,a0                         ; el audio no se usa
         lea     v_delta(pc),a1
@@ -129,8 +134,12 @@ entry:
 .nodelta:
 
         move.l  v_copper(pc),a0
-        lea     palbuf(pc),a1
         bsr     build_copper
+        move.l  v_palptr(pc),d0               ; el primer paquete siempre trae
+        beq.s   .nopw                         ; paleta, pero por las dudas
+        move.l  d0,a1
+        bsr     write_palette
+.nopw:
 
         ;--- volcado para verificar desde el PC --------------------
         bsr     dump
@@ -189,7 +198,18 @@ dump:
         move.l  #DUMP_SECTOR*512,IO_OFFSET(a1)
         jsr     _LVODoIO(a6)
         moveq   #0,d1
-        move.b  IO_ERROR(a5),d1               ; a1 no sobrevive a DoIO
+        move.b  IO_ERROR(a5),d1               ; a1 no sobrevive a DoIO,
+        move.l  d1,-(sp)                      ; ni d1: a la pila
+
+        move.l  a5,a1                         ; el copper list, entero
+        move.w  #CMD_WRITE,IO_COMMAND(a1)
+        move.l  #COPPER_SIZE,IO_LENGTH(a1)
+        move.l  v_copper(pc),IO_DATA(a1)
+        move.l  #COPDUMP_SECTOR*512,IO_OFFSET(a1)
+        jsr     _LVODoIO(a6)
+        moveq   #0,d0
+        move.b  IO_ERROR(a5),d0
+        move.l  d0,-(sp)
 
         lea     infobuf(pc),a0
         move.l  #$4642444d,(a0)+              ; "FBDM"
@@ -199,11 +219,9 @@ dump:
         move.l  a2,(a0)+                      ; direccion del framebuffer
         move.l  v_copper(pc),(a0)+            ; direccion del copper list
         move.l  v_consumed(pc),(a0)+          ; bytes de delta consumidos
-        move.l  d1,(a0)+                      ; error al volcar el framebuffer
-        lea     palbuf(pc),a1
-        moveq   #15,d0
-.p:     move.w  (a1)+,(a0)+
-        dbf     d0,.p
+        move.l  4(sp),(a0)+                   ; error al volcar el framebuffer
+        move.l  (sp)+,(a0)+                   ; error al volcar el copper list
+        addq.l  #4,sp
 
         move.l  a5,a1
         move.w  #CMD_WRITE,IO_COMMAND(a1)
@@ -238,7 +256,8 @@ v_copper:   dc.l    0
 v_consumed: dc.l    0
 v_op:       dc.b    0
         even
-palbuf:     ds.w    16
+v_palptr:   dc.l    0                   ; paletas del primer paquete
+v_palbytes: dc.w    0                   ; y su tamano
 dbltab:     ds.w    256
         cnop    0,4
 infobuf:    ds.b    512
