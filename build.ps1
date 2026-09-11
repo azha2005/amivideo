@@ -1,9 +1,12 @@
 <#
     build.ps1 - construccion de A500VP.
 
-        .\build.ps1                 ensambla, compila y genera work\a500vp.adf
-        .\build.ps1 run             ademas lo arranca en WinUAE
-        .\build.ps1 check           lo arranca y lee la medicion del Hito 0
+        .\build.ps1                 ensambla y compila todo
+        .\build.ps1 disk -Video X   el disco de verdad: work\a500vp.adf
+        .\build.ps1 run             arranca en WinUAE el disco del Hito 0
+        .\build.ps1 check           ...y lee la medicion de memoria
+        .\build.ps1 still           Hito 3: frame fijo, verificado byte a byte
+        .\build.ps1 play            Hito 4/5: disco de medicion
         .\build.ps1 clean           borra work\
 
     Rutas por defecto detectadas en esta maquina; se pueden pisar con
@@ -11,7 +14,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('build', 'run', 'check', 'still', 'play', 'clean')]
+    [ValidateSet('build', 'run', 'check', 'still', 'play', 'disk', 'clean')]
     [string]$Task = 'build',
 
     [string]$Vasm   = 'C:\Users\JC\vbcc\bin\vasmm68k_mot.exe',
@@ -23,9 +26,13 @@ param(
     # solo arranca y mide, con lo que unos pocos alcanzan.
     [int]$Timeout = 25,
 
-    # Hito 3: bitstream del que sale el frame fijo, y cual frame.
-    # Hito 4: el mismo bitstream es el que se reproduce.
-    [string]$Stream = 'work\final22.a5v',
+    # disk: el video fuente y cuanto tomar (los primeros 22 s, Hito 2).
+    [string]$Video = '',
+    [double]$Duration = 22,
+
+    # still / play: el bitstream que se usa (el que deja 'disk'), y para
+    # still, cual frame.
+    [string]$Stream = 'work\video.a5v',
     [int]$Frame = 182,
 
     # Hito 4: cuanto dejar correr el disco de medicion (carga + video +
@@ -41,6 +48,8 @@ $work = Join-Path $root 'work'
 # El ultimo sector del disquete lleva la medicion que graba el reproductor.
 $RESULT_SECTOR = 1759
 $SECTOR_SIZE   = 512
+# El disco de medicion (player.s -DBENCH=1) graba en los sectores 1754..1759.
+$BenchTail     = 6
 
 function Invoke-Tool {
     param([string]$Exe, [string[]]$Arguments)
@@ -100,6 +109,7 @@ function Build-All {
     $cflags = @('-std=c11', '-O2', '-Wall', '-Wextra', '-pedantic')
 
     Invoke-Tool $Gcc ($cflags + $shared + @((Join-Path $root 'encoder\encode.c'),
+                       (Join-Path $root 'encoder\adf.c'),
                        '-o', (Join-Path $work 'a500vp-enc.exe'), '-lm'))
 
     Invoke-Tool $Gcc ($cflags + $shared + @((Join-Path $root 'encoder\decode.c'),
@@ -108,7 +118,7 @@ function Build-All {
     Invoke-Tool (Join-Path $work 'mkadf.exe') @(
         '--boot',   (Join-Path $work 'boot.bin'),
         '--player', (Join-Path $work 'memcheck.bin'),
-        '--out',    (Join-Path $work 'a500vp.adf'))
+        '--out',    (Join-Path $work 'memcheck.adf'))
 }
 
 #---------------------------------------------------------------------------
@@ -129,7 +139,7 @@ function Start-Emulator {
         throw "Falta la ROM de Kickstart. Pasa -Rom <ruta> o deja kick12.rom en la raiz."
     }
 
-    $adf = if ($AdfPath) { $AdfPath } else { Join-Path $work 'a500vp.adf' }
+    $adf = if ($AdfPath) { $AdfPath } else { Join-Path $work 'memcheck.adf' }
     if (-not (Test-Path $adf)) { throw "No hay ADF en '$adf'; corre '.\build.ps1' primero." }
     $runAdf = Join-Path $work 'run.adf'
     Copy-Item $adf $runAdf -Force
@@ -334,6 +344,30 @@ switch ($Task) {
         if (-not (Test-Still $r.Adf $still)) { exit 1 }
     }
 
+    'disk' {
+        # El disco de verdad: el encoder arma el bitstream y el .adf completo
+        # (bootblock + reproductor + datos); el decoder de referencia lo
+        # verifica y saca el preview con el audio tal como va a sonar.
+        Build-All
+        if (-not $Video) { throw "Falta -Video <ruta al video fuente>." }
+        $out = Join-Path $work 'video.a5v'
+        $adf = Join-Path $work 'a500vp.adf'
+        # El mismo video.a5v tiene que entrar tambien en el disco de medicion
+        # (tarea play): su reproductor es mas largo y escribe los resultados
+        # en los ultimos $BenchTail sectores. Se reserva justo esa diferencia.
+        $pl = (Get-Item (Join-Path $work 'player.bin')).Length
+        $pb = (Get-Item (Join-Path $work 'player_bench.bin')).Length
+        $tail = $BenchTail + [math]::Ceiling($pb / 512) - [math]::Ceiling($pl / 512)
+        Invoke-Tool (Join-Path $work 'a500vp-enc.exe') @('--in', $Video,
+            '--duration', "$Duration", '--out', $out, '--adf', $adf,
+            '--boot', (Join-Path $work 'boot.bin'),
+            '--player', (Join-Path $work 'player.bin'),
+            '--reserve-tail', "$tail")
+        Invoke-Tool (Join-Path $work 'a500vp-dec.exe') @('--in', $out,
+            '--preview', (Join-Path $work 'preview.mp4'))
+        Write-Host "disco      : $adf"
+    }
+
     'play' {
         Build-All
         $streamPath = if ([System.IO.Path]::IsPathRooted($Stream)) { $Stream } else { Join-Path $root $Stream }
@@ -345,7 +379,7 @@ switch ($Task) {
             '--boot',   (Join-Path $work 'boot.bin'),
             '--player', (Join-Path $work 'player_bench.bin'),
             '--data',   $streamPath,
-            '--reserve-tail', '41',
+            '--reserve-tail', "$BenchTail",
             '--out',    $adf)
 
         # Una carpeta con marca de tiempo por corrida, para no mezclar
