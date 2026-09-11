@@ -798,19 +798,8 @@ int main(int argc, char **argv)
 
             if (!f) die("no pude abrir el archivo de salida");
             a5buf_init(&hdr);
-            a5buf_write(&hdr, A5V_MAGIC, 4);
-            a5buf_put16(&hdr, A5V_VERSION);
-            a5buf_put16(&hdr, 0);                  /* flags: sin audio aun */
-            a5buf_put16(&hdr, A5_W);
-            a5buf_put16(&hdr, A5_H);
-            a5buf_put8(&hdr, (unsigned)planes);
-            a5buf_put8(&hdr, (unsigned)ncolors);
-            a5buf_put16(&hdr, 0);                  /* periodo de audio */
-            a5buf_put16(&hdr, (unsigned)y0);
-            a5buf_put16(&hdr, (unsigned)y1);
-            a5buf_put32(&hdr, (uint32_t)nframes);
-            a5buf_put32(&hdr, (uint32_t)st.buf.len);
-            a5buf_put32(&hdr, 0);                  /* reservado */
+            a5v_put_header(&hdr, planes, ncolors, 0 /* sin audio aun */,
+                           y0, y1, (uint32_t)nframes, (uint32_t)st.buf.len);
             fwrite(hdr.p, 1, hdr.len, f);
             fwrite(st.buf.p, 1, st.buf.len, f);
             fclose(f);

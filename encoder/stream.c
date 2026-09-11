@@ -188,6 +188,36 @@ const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
     return data;
 }
 
+/* --- cabecera y doblado --------------------------------------------------- */
+
+void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_period,
+                    int y0, int y1, uint32_t npackets, uint32_t payload)
+{
+    a5buf_write(b, A5V_MAGIC, 4);
+    a5buf_put16(b, A5V_VERSION);
+    a5buf_put16(b, audio_period ? 1u : 0u);    /* flags: bit 0 = hay audio */
+    a5buf_put16(b, A5_W);
+    a5buf_put16(b, A5_H);
+    a5buf_put8(b, (unsigned)planes);
+    a5buf_put8(b, (unsigned)ncolors);
+    a5buf_put16(b, (unsigned)audio_period);
+    a5buf_put16(b, (unsigned)y0);
+    a5buf_put16(b, (unsigned)y1);
+    a5buf_put32(b, npackets);
+    a5buf_put32(b, payload);
+    a5buf_put32(b, 0);                         /* reservado */
+}
+
+uint16_t a5_double_byte(uint8_t v)
+{
+    unsigned w = 0;
+    int i;
+
+    for (i = 7; i >= 0; i--)
+        w = (w << 2) | (((v >> i) & 1) ? 3u : 0u);
+    return (uint16_t)w;
+}
+
 /* --- crc32 (el de zlib, sin tabla precalculada) -------------------------- */
 
 uint32_t a5_crc32(const void *data, size_t n, uint32_t crc)

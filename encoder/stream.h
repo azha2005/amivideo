@@ -87,6 +87,16 @@ const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
 /* Cuenta el costo de un delta ya codificado sin aplicarlo. */
 long a5_delta_cost(const A5DeltaStats *st);
 
+/* --- cabecera y doblado ------------------------------------------------- */
+
+/* Escribe la cabecera de 32 bytes del bitstream (docs/FORMAT.md). */
+void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_period,
+                    int y0, int y1, uint32_t npackets, uint32_t payload);
+
+/* Doblado horizontal: cada bit del byte logico se repite dos veces, el bit 7
+ * termina en los bits 15-14. Es la misma tabla que arma el reproductor. */
+uint16_t a5_double_byte(uint8_t v);
+
 /* --- checksum de verificacion ------------------------------------------- */
 uint32_t a5_crc32(const void *data, size_t n, uint32_t crc);
 

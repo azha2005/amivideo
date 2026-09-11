@@ -59,11 +59,90 @@ static uint32_t frame_crc(const uint8_t *vis, size_t fsz,
     return a5_crc32(pb, (size_t)ncolors * 2, a5_crc32(vis, fsz, 0));
 }
 
+/* Exporta el frame visible como un bitstream de un solo paquete: un DELTA
+ * desde negro con su paleta. Es lo que muestra el reproductor del Hito 3.
+ * Escribe ademas lo que el reproductor tiene que dejar en su framebuffer
+ * (<out>.fb: planos doblados a 40 bytes por fila, plano 0 primero) y una
+ * imagen de referencia de 320x256 (<out>.ppm). */
+static void write_still(const char *out, int planes, int ncolors, int y0,
+                        int y1, const uint8_t *idx, const A5Color *pal)
+{
+    size_t fsz = (size_t)A5_W * A5_H, plen, raw;
+    uint8_t *black = calloc(fsz, 1);
+    uint8_t planar[A5_MAX_PLANES * A5_ROWBYTES];
+    A5Buf delta, file;
+    A5DeltaStats ds;
+    char path[1024];
+    FILE *f;
+    int c, p, y, b;
+
+    if (!black) die("sin memoria");
+    a5buf_init(&delta);
+    a5buf_init(&file);
+    a5_delta_encode(&delta, black, idx, planes, &ds);
+
+    raw = 6 + (size_t)ncolors * 2 + delta.len;
+    plen = (raw + 1) & ~(size_t)1;
+    a5v_put_header(&file, planes, ncolors, 0, y0, y1, 1, (uint32_t)plen);
+    a5buf_put16(&file, (unsigned)plen);
+    a5buf_put8(&file, A5V_OP_DELTA);
+    a5buf_put8(&file, A5V_F_PALETTE);
+    a5buf_put16(&file, 0);
+    for (c = 0; c < ncolors; c++) a5buf_put16(&file, pal[c]);
+    a5buf_write(&file, delta.p, delta.len);
+    if (raw != plen) a5buf_put8(&file, 0);
+
+    f = fopen(out, "wb");
+    if (!f || fwrite(file.p, 1, file.len, f) != file.len) die("no pude escribir el frame fijo");
+    fclose(f);
+
+    snprintf(path, sizeof path, "%s.fb", out);
+    f = fopen(path, "wb");
+    if (!f) die("no pude escribir el framebuffer esperado");
+    for (p = 0; p < planes; p++) {
+        for (y = 0; y < A5_H; y++) {
+            a5_planarize_row(idx + (size_t)y * A5_W, planes, planar);
+            for (b = 0; b < A5_ROWBYTES; b++) {
+                uint16_t w = a5_double_byte(planar[p * A5_ROWBYTES + b]);
+                fputc(w >> 8, f);
+                fputc(w & 0xFF, f);
+            }
+        }
+    }
+    fclose(f);
+
+    snprintf(path, sizeof path, "%s.ppm", out);
+    f = fopen(path, "wb");
+    if (!f) die("no pude escribir la imagen de referencia");
+    fprintf(f, "P6\n%d %d\n255\n", A5_DISP_W, A5_DISP_H);
+    for (y = 0; y < A5_DISP_H; y++) {
+        int x;
+        for (x = 0; x < A5_DISP_W; x++) {
+            uint8_t r, g, bl;
+            a5_rgb444_to_srgb(pal[idx[(y / 2) * A5_W + x / 2]], &r, &g, &bl);
+            fputc(r, f); fputc(g, f); fputc(bl, f);
+        }
+    }
+    fclose(f);
+
+    printf("frame fijo : %s (%lu bytes; delta de %lu bytes, %d filas, "
+           "%d columnas)\n", out, (unsigned long)file.len,
+           (unsigned long)delta.len, ds.rows, ds.cols);
+    printf("             %s.fb (framebuffer esperado), %s.ppm (referencia)\n",
+           out, out);
+
+    a5buf_free(&delta);
+    a5buf_free(&file);
+    free(black);
+}
+
 int main(int argc, char **argv)
 {
     const char *in = NULL, *preview = NULL, *audio_src = NULL;
     double audio_start = 0, audio_dur = 0;
     int pscale = 2, i;
+    long still_k = -1;
+    const char *still_out = NULL;
 
     uint8_t *data, *crcdata = NULL;
     size_t len, crclen = 0;
@@ -92,10 +171,13 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--audio-start") && has)  audio_start = atof(argv[++i]);
         else if (!strcmp(a, "--audio-duration") && has) audio_dur = atof(argv[++i]);
         else if (!strcmp(a, "--preview-scale") && has) pscale = atoi(argv[++i]);
+        else if (!strcmp(a, "--still") && has)        still_k = atol(argv[++i]);
+        else if (!strcmp(a, "--still-out") && has)    still_out = argv[++i];
         else {
             printf("uso: a500vp-dec --in <video.a5v> [--preview <out.mp4>]\n"
                    "                [--audio <fuente>] [--audio-start S]\n"
-                   "                [--audio-duration S] [--preview-scale N]\n");
+                   "                [--audio-duration S] [--preview-scale N]\n"
+                   "                [--still K --still-out <frame.a5v>]\n");
             return 2;
         }
     }
@@ -230,6 +312,11 @@ int main(int argc, char **argv)
                             (unsigned long)got, (unsigned long)want);
                 bad++;
             }
+        }
+
+        if (still_k >= 0 && (long)n == still_k) {
+            if (!still_out) die("--still necesita --still-out");
+            write_still(still_out, planes, ncolors, y0, y1, idxbuf, pal);
         }
 
         p = pkend;
