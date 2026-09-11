@@ -100,15 +100,90 @@ static int solve3(double A[3][3], double b[3], double x[3])
     return 0;
 }
 
+/* Recorre los paquetes y decodifica todo el audio como lo hace el lector de
+ * audio del reproductor: un flujo continuo, independiente del video. */
+static int8_t *extract_audio(const uint8_t *data, size_t len, uint32_t nframes,
+                             int ncolors, int afmt, size_t *nout)
+{
+    const uint8_t *p = data + A5V_HEADER_SIZE, *end = data + len;
+    int8_t *out = NULL;
+    size_t n = 0, cap = 0;
+    int acc = 0;
+    uint32_t i;
+
+    for (i = 0; i < nframes; i++) {
+        unsigned plen, alen;
+        const uint8_t *a;
+        size_t ns;
+
+        if (end - p < 6) die("el bitstream se corta antes de tiempo");
+        plen = be16(p);
+        alen = be16(p + 4);
+        if (plen < 6 || (size_t)(end - p) < plen) die("paquete invalido");
+        a = p + 6 + ((p[3] & A5V_F_PALETTE) ? ncolors * 2 : 0);
+        if (a + alen > p + plen) die("audio incompleto");
+        ns = afmt == A5V_AUDIO_FIB4 ? (size_t)alen * 2 : alen;
+        if (n + ns > cap) {
+            cap = (n + ns) * 2 + 4096;
+            out = realloc(out, cap);
+            if (!out) die("sin memoria");
+        }
+        if (afmt == A5V_AUDIO_FIB4) a5_fib4_decode(a, alen, &acc, out + n);
+        else                        memcpy(out + n, a, alen);
+        n += ns;
+        p += plen;
+    }
+    *nout = n;
+    return out;
+}
+
+/* WAV de 16 bits mono, para mezclar el audio decodificado en el preview. */
+static void put_le(FILE *f, uint32_t v, int bytes)
+{
+    while (bytes--) { fputc((int)(v & 0xFF), f); v >>= 8; }
+}
+
+static void write_wav(const char *path, const int8_t *s, size_t n, int rate)
+{
+    FILE *f = fopen(path, "wb");
+    uint32_t datalen = (uint32_t)n * 2;
+    size_t i;
+
+    if (!f) die("no pude escribir el WAV del preview");
+    fwrite("RIFF", 1, 4, f); put_le(f, 36 + datalen, 4);
+    fwrite("WAVEfmt ", 1, 8, f);
+    put_le(f, 16, 4); put_le(f, 1, 2); put_le(f, 1, 2);
+    put_le(f, (uint32_t)rate, 4); put_le(f, (uint32_t)rate * 2, 4);
+    put_le(f, 2, 2); put_le(f, 16, 2);
+    fwrite("data", 1, 4, f); put_le(f, datalen, 4);
+    for (i = 0; i < n; i++) put_le(f, (uint16_t)(int16_t)(s[i] * 256), 2);
+    fclose(f);
+}
+
+#define MEAS_AUD_SAMPLES 512      /* muestras por buffer de Paula (player.s) */
+#define MEAS_CCK_FRAME   (A5_PAL_LINES * A5_CCK_PER_LINE)
+
+static double stamp_cck(const uint8_t *s)
+{
+    return (double)be32(s) * MEAS_CCK_FRAME + be16(s + 4) * A5_CCK_PER_LINE
+         + be16(s + 6);
+}
+
 static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
-                           int planes)
+                           int planes, int aper, size_t asamples,
+                           uint32_t nframes)
 {
     const uint8_t *in = adf + MEAS_INFO_SECTOR * 512;
     uint32_t bytes = be32(in + 12), tod = be32(in + 8);
     double load_s = tod / A5_VBL_HZ;
     double A[3][3] = { { 0 } }, b[3] = { 0 }, x[3] = { 0 };
     double sum = 0, maxm = 0, sse = 0, sst = 0, mean, maxres = 0;
-    double ratio = 0, worst_model = 0;
+    double ratio = 0, worst_model = 0, ysum = 0, ymean;
+    double fill_cpu = 0, a_t0 = 0, a_per = 1;  /* audio medido */
+    uint32_t a_cnt = 0;
+    long fillc = a5_audio_fill_cost((int)be32(in + 100));  /* del modelo */
+    double *y = NULL;        /* medido menos los llenados de audio */
+    int *fills = NULL;       /* llenados de audio dentro de cada delta */
     int i, j, k, maxn = -1;
 
     printf("\n--- mediciones de la Amiga ---\n");
@@ -126,10 +201,98 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
     if (be32(in + 72))
         printf("AVISO: la tabla de tiempos se grabo con error %lu\n",
                (unsigned long)be32(in + 72));
+
+    /* Sincronia: cada interrupcion de audio es el principio de un buffer de
+     * 512 muestras. La primera es la muestra 0; de ahi sale cuando tendria
+     * que terminar el audio, y se compara con cuando termina el video. */
+    if (be32(in + 100) && be32(in + 76) >= 2) {
+        uint32_t cnt = be32(in + 76);
+        double t0 = stamp_cck(in + 80), t1 = stamp_cck(in + 88);
+        double vstart = (double)be32(in + 96) * MEAS_CCK_FRAME;
+        double per = (double)(aper ? aper : (int)be32(in + 104));
+        double want = MEAS_AUD_SAMPLES * per;
+        double got = (t1 - t0) / (cnt - 1);
+        double drift = (t1 - t0) - (cnt - 1) * want;
+        double aend = t0 + asamples * per;
+        double vend = vstart + 2.0 * nframes * MEAS_CCK_FRAME;
+
+        printf("audio      : %lu buffers; arranco %.2f ms despues del VBL "
+               "del frame 0\n", (unsigned long)cnt,
+               (t0 - vstart) * 1000 / A5_CCK_PAL);
+        printf("             un buffer cada %.1f color clocks (esperado "
+               "%.0f): deriva de %.3f ms en %.1f s\n", got, want,
+               drift * 1000 / A5_CCK_PAL, (t1 - t0) / A5_CCK_PAL);
+        printf("             el audio termina %.2f ms %s que el video\n",
+               fabs(aend - vend) * 1000 / A5_CCK_PAL,
+               aend >= vend ? "despues" : "antes");
+        printf("             %.0f buffers caben entre el primero y el final "
+               "del video\n", floor((vend - t0) / want) + 1);
+        a_cnt = cnt; a_t0 = t0; a_per = want;
+        if (be32(in + 108)) {
+            double mean_cck = (double)be32(in + 108) / cnt;
+            fill_cpu = 2.0 * mean_cck;
+            printf("             llenar un buffer: %.3f ms de media "
+                   "(%.0f ciclos), %.3f ms el peor; %.1f%% de la CPU\n",
+                   mean_cck * 1000 / A5_CCK_PAL, fill_cpu,
+                   be32(in + 112) * 1000.0 / A5_CCK_PAL,
+                   100 * mean_cck / want);
+            /* Un llenado de mas de un frame es una estampa rota (una resta
+             * negativa): entonces la suma, y la media, tampoco sirven. */
+            if (be32(in + 112) > MEAS_CCK_FRAME)
+                printf("  AVISO: el peor llenado es imposible: hay una "
+                       "estampa rota y la media no es confiable\n");
+        }
+    }
     if (np < 3) {
         printf("decodif.   : muy pocos tiempos para ajustar el modelo (%d)\n",
                np);
         return;
+    }
+
+    /* Cuantos llenados de audio cayeron dentro de cada delta. Se reconstruye
+     * la linea de tiempo del reproductor con los tiempos medidos: el primer
+     * delta empieza 2 VBL antes del frame 0, y cada uno de los siguientes en
+     * el VBL en que se intercambio el anterior (el que le tocaba, o el
+     * primero despues de terminar si llego tarde). Contar los frames tarde
+     * de la reconstruccion y compararlos con los de la Amiga la valida. */
+    y = malloc((size_t)np * sizeof *y);
+    fills = calloc((size_t)np, sizeof *fills);
+    if (!y || !fills) die("sin memoria");
+    {
+        double F = MEAS_CCK_FRAME, vs = (double)be32(in + 96);
+        double start = (vs - 2) * F;
+        int late = 0, nf = 0;
+
+        for (i = 0; i < np; i++) {
+            double due = vs + 2.0 * pt[i].n;           /* VBL en que se ve */
+            double end = start + pt[i].cycles / 2;     /* en color clocks */
+            double sw = ceil(end / F);
+            if (sw < due) sw = due;
+            if (sw > due) late++;
+            if (fill_cpu > 0) {
+                double k0 = ceil((start - a_t0) / a_per);
+                double k1 = ceil((end - a_t0) / a_per) - 1;
+                if (k0 < 0) k0 = 0;
+                if (k1 > a_cnt - 1.0) k1 = a_cnt - 1.0;
+                fills[i] = k1 >= k0 ? (int)(k1 - k0 + 1) : 0;
+                nf += fills[i];
+            }
+            y[i] = pt[i].cycles - fills[i] * fill_cpu;
+            start = sw * F;
+            /* Si al intercambiar habia un llenado en curso, el lazo
+             * principal no vuelve hasta que termina: el VBL lo interrumpe,
+             * pero despues sigue el llenado. */
+            if (fill_cpu > 0 && start > a_t0) {
+                double kk = floor((start - a_t0) / a_per);
+                double fend = a_t0 + kk * a_per + fill_cpu / 2;
+                if (kk < a_cnt && fend > start) start = fend;
+            }
+        }
+        printf("linea de tiempo: reconstruida con lo medido, %d frames tarde "
+               "(la Amiga conto %lu)\n", late, (unsigned long)be32(in + 32));
+        if (fill_cpu > 0)
+            printf("             %d llenados de audio cayeron dentro de "
+                   "deltas; el ajuste los descuenta\n", nf);
     }
 
     for (i = 0; i < np; i++) {
@@ -138,47 +301,52 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
         f[0] = 1; f[1] = pt[i].rows; f[2] = pt[i].cols;
         for (j = 0; j < 3; j++) {
             for (k = 0; k < 3; k++) A[j][k] += f[j] * f[k];
-            b[j] += f[j] * pt[i].cycles;
+            b[j] += f[j] * y[i];
         }
         sum += pt[i].cycles;
+        ysum += y[i];
         if (pt[i].cycles > maxm) { maxm = pt[i].cycles; maxn = i; }
         s.rows = pt[i].rows; s.cols = pt[i].cols; s.bytes = pt[i].bytes;
         s.cycles = 0;
-        ratio += a5_delta_cost(&s) / pt[i].cycles;
+        ratio += (a5_delta_cost(&s) + fills[i] * fillc) / pt[i].cycles;
     }
     mean = sum / np;
+    ymean = ysum / np;
     ratio /= np;
 
     if (solve3(A, b, x) != 0) {
         printf("decodif.   : el ajuste no tiene solucion (datos degenerados)\n");
+        free(y); free(fills);
         return;
     }
     for (i = 0; i < np; i++) {
         double pred = x[0] + x[1] * pt[i].rows + x[2] * pt[i].cols;
-        double r = pt[i].cycles - pred;
+        double r = y[i] - pred;
         sse += r * r;
-        sst += (pt[i].cycles - mean) * (pt[i].cycles - mean);
+        sst += (y[i] - ymean) * (y[i] - ymean);
         if (fabs(r) > maxres) maxres = fabs(r);
     }
     {
         A5DeltaStats s;
         s.rows = pt[maxn].rows; s.cols = pt[maxn].cols;
         s.bytes = pt[maxn].bytes; s.cycles = 0;
-        worst_model = (double)a5_delta_cost(&s);
+        worst_model = (double)a5_delta_cost(&s) + fills[maxn] * fillc;
     }
 
     printf("decodif.   : %d deltas medidos, media %.2f ms, peor %.2f ms "
-           "(frame %d: %d filas, %d columnas)\n",
+           "(frame %d: %d filas, %d columnas, %d llenados de audio)\n",
            np, mean * 1000 / A5_CPU_HZ, maxm * 1000 / A5_CPU_HZ,
-           pt[maxn].n, pt[maxn].rows, pt[maxn].cols);
-    printf("modelo     : el actual predice en promedio el %.0f%% de lo "
-           "medido; para el peor frame, %.2f ms\n",
-           ratio * 100, worst_model * 1000 / A5_CPU_HZ);
+           pt[maxn].n, pt[maxn].rows, pt[maxn].cols, fills[maxn]);
+    printf("modelo     : el actual (con %ld ciclos por llenado) predice en "
+           "promedio el %.1f%% de lo medido; para el peor frame, %.2f ms\n",
+           fillc, ratio * 100, worst_model * 1000 / A5_CPU_HZ);
     printf("ajuste     : ciclos = %.0f + %.1f x filas + %.1f x columnas  "
-           "(R2 = %.4f)\n", x[0], x[1], x[2], sst > 0 ? 1 - sse / sst : 0);
+           "(R2 = %.4f)%s\n", x[0], x[1], x[2], sst > 0 ? 1 - sse / sst : 0,
+           fill_cpu > 0 ? ", sin los llenados de audio" : "");
     printf("             residuo maximo %.3f ms\n", maxres * 1000 / A5_CPU_HZ);
     printf("             con %d planos: %.1f ciclos por byte literal si se "
            "le carga todo el costo de la columna\n", planes, x[2] / planes);
+    free(y); free(fills);
 }
 
 /* Exporta el frame visible como un bitstream de un solo paquete: un DELTA
@@ -205,7 +373,8 @@ static void write_still(const char *out, int planes, int ncolors, int y0,
 
     raw = 6 + (size_t)ncolors * 2 + delta.len;
     plen = (raw + 1) & ~(size_t)1;
-    a5v_put_header(&file, planes, ncolors, 0, y0, y1, 1, (uint32_t)plen);
+    a5v_put_header(&file, planes, ncolors, A5V_AUDIO_NONE, 0, y0, y1, 1,
+                   (uint32_t)plen);
     a5buf_put16(&file, (unsigned)plen);
     a5buf_put8(&file, A5V_OP_DELTA);
     a5buf_put8(&file, A5V_F_PALETTE);
@@ -273,7 +442,10 @@ int main(int argc, char **argv)
     uint8_t *data, *crcdata = NULL;
     size_t len, crclen = 0;
     const uint8_t *p, *end;
-    int planes, ncolors, w, h, y0, y1;
+    int planes, ncolors, w, h, y0, y1, afmt, aper;
+    int8_t *asamples = NULL;
+    size_t nasamples = 0;
+    char wavpath[1024];
     uint32_t nframes;
 
     uint8_t *fb[2], *idxbuf;
@@ -325,6 +497,10 @@ int main(int argc, char **argv)
     y0       = (int)be16(data + 16);
     y1       = (int)be16(data + 18);
     nframes  = be32(data + 20);
+    afmt     = data[A5V_HDR_AUDIOFMT];
+    aper     = (int)be16(data + 14);
+    if (afmt > A5V_AUDIO_PCM8) die("formato de audio desconocido");
+    if (afmt && aper < 124) die("periodo de audio invalido");
 
     if (w != A5_W || h != A5_H) die("geometria inesperada");
 
@@ -333,6 +509,17 @@ int main(int argc, char **argv)
            w, h, planes, ncolors, y0, y1 - 1);
     printf("             %lu frames, %.3f s\n", (unsigned long)nframes,
            nframes / A5_VIDEO_FPS);
+
+    if (afmt) {
+        asamples = extract_audio(data, len, nframes, ncolors, afmt,
+                                 &nasamples);
+        printf("             audio %s, periodo %d = %.3f Hz, %lu muestras "
+               "(%.3f s)\n", afmt == A5V_AUDIO_FIB4 ? "fib4" : "pcm8", aper,
+               A5_CCK_PAL / aper, (unsigned long)nasamples,
+               nasamples / (A5_CCK_PAL / aper));
+    } else {
+        printf("             sin audio\n");
+    }
 
     {
         char crcpath[1024];
@@ -367,10 +554,23 @@ int main(int argc, char **argv)
     memset(pal, 0, sizeof pal);
 
     if (preview) {
+        int arate = 0;
         row = malloc((size_t)A5_DISP_W * 3);
+        if (audio_src) {
+            arate = 44100;                 /* la fuente, tal cual */
+        } else if (asamples) {
+            /* El audio del bitstream, decodificado: lo que va a sonar. El
+             * WAV lleva frecuencia entera y Paula toca a 3546895/periodo;
+             * para el preview la diferencia (0,006% con 443) no importa. */
+            arate = (int)(A5_CCK_PAL / aper + 0.5);
+            snprintf(wavpath, sizeof wavpath, "%s.wav", preview);
+            write_wav(wavpath, asamples, nasamples, arate);
+            audio_src = wavpath;
+            audio_start = audio_dur = 0;
+        }
         pre = a5_open_preview(preview, A5_DISP_W, A5_DISP_H, A5_VIDEO_FPS,
                               pscale, audio_src, audio_start, audio_dur,
-                              1.0, audio_src ? 44100 : 0);
+                              1.0, arate);
         if (!pre || !row) die("no pude arrancar ffmpeg para el preview");
     }
 
@@ -502,7 +702,19 @@ int main(int argc, char **argv)
     if (preview)
         printf("preview    : %s\n", preview);
     if (adf)
-        report_measure(adf, mpts, nmp, planes);
+        report_measure(adf, mpts, nmp, planes, aper, nasamples, nframes);
+
+    if (crcdata && asamples && crclen >= nframes * 4u + 4) {
+        uint32_t want = be32(crcdata + nframes * 4);
+        uint32_t got = a5_crc32(asamples, nasamples, 0);
+        if (want != got) {
+            printf("\nVERIFICACION: FALLA. El audio decodificado no coincide "
+                   "con el del encoder.\n");
+            return 1;
+        }
+        printf("audio      : %lu muestras, identicas a las que simulo el "
+               "encoder\n", (unsigned long)nasamples);
+    }
 
     if (crcdata) {
         if (bad) {
@@ -517,6 +729,6 @@ int main(int argc, char **argv)
     }
 
     free(fb[0]); free(fb[1]); free(idxbuf); free(data); free(crcdata);
-    free(adf); free(mpts);
+    free(adf); free(mpts); free(asamples);
     return 0;
 }
