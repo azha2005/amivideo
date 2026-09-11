@@ -35,6 +35,11 @@ TIMING_SECTOR equ 1754                ; tabla de tiempos, 5 sectores
 TIMING_MAX    equ 640                 ; paquetes que entran en la tabla
 INFO_SECTOR   equ 1759
 
+AUD_SAMPLES   equ 512                 ; muestras por buffer de Paula (64 ms)
+AUD_WORDS     equ AUD_SAMPLES/2
+AFMT_FIB4     equ 1
+AFMT_PCM8     equ 2
+
 COL_NOMEM     equ $0f00               ; rojo: sin memoria / no entra
 COL_DISK      equ $0f0f               ; magenta: fallo de trackdisk
 COL_BADHDR    equ $0ff0               ; amarillo: bitstream invalido
@@ -74,7 +79,24 @@ V_STAMP1    equ 118     ; 8
 V_MAXDEC    equ 126     ; l  peor decodificacion, en color clocks
 V_MAXDECF   equ 130     ; l  y en que frame
 V_NDELTA    equ 134     ; l  deltas medidos
-VARS_SIZE   equ 138
+V_AFMT      equ 138     ; w  formato de audio (0 = sin audio)
+V_APER      equ 140     ; w  periodo de Paula
+V_AGO       equ 142     ; w  arrancar el audio en el VBL V_START
+V_ABUF      equ 144     ; 2l buffers de Paula
+V_ANEXT     equ 152     ; w  buffer que toca llenar
+V_APKT      equ 154     ; l  proximo paquete para el lector de audio
+V_APTR      equ 158     ; l  proximo byte de audio
+V_ALEFT     equ 162     ; l  bytes de audio que quedan en el paquete
+V_ANPKT     equ 166     ; l  paquetes que le quedan al lector de audio
+V_AACC      equ 170     ; w  acumulador fib4 / ultima muestra
+V_ACOUNT    equ 172     ; l  interrupciones de audio (medicion)
+V_AFIRST    equ 176     ; 8  estampa de la primera
+V_ALAST     equ 184     ; 8  estampa de la ultima
+V_OLDINT4   equ 192     ; l  vector de nivel 4 del sistema
+V_AFEND     equ 196     ; 8  estampa del final del ultimo llenado
+V_AFSUM     equ 204     ; l  color clocks llenando buffers, sumados
+V_AFMAX     equ 208     ; l  el llenado mas largo
+VARS_SIZE   equ 212
 
 ;----------------------------------------------------------------------
 ; Cabecera del reproductor. mkadf escribe donde quedaron los datos.
@@ -118,7 +140,7 @@ entry:
         lea     header(pc),a0
         cmp.l   #$41355650,(a0)               ; "A5VP"
         bne     badhdr
-        cmp.w   #2,4(a0)                      ; version de formato
+        cmp.w   #3,4(a0)                      ; version de formato
         bne     badhdr
         moveq   #0,d6
         move.b  12(a0),d6                     ; d6 = bitplanes
@@ -131,6 +153,18 @@ entry:
         lsl.w   d6,d0
         subq.w  #1,d0
         move.w  d0,V_NCOLM1(a4)
+
+        moveq   #0,d0                         ; audio
+        move.b  28(a0),d0
+        move.w  d0,V_AFMT(a4)
+        beq.s   .noahdr
+        cmp.w   #AFMT_PCM8,d0
+        bhi     badhdr
+        move.w  14(a0),d0                     ; periodo: Paula no baja de 124
+        cmp.w   #124,d0
+        blo     badhdr
+        move.w  d0,V_APER(a4)
+.noahdr:
 
         ;--- framebuffers y copper lists, en Chip ------------------
         move.w  d6,d0
@@ -155,6 +189,18 @@ entry:
         jsr     _LVOAllocMem(a6)
         move.l  d0,V_COP+4(a4)
         beq     nomem
+
+        ;--- buffers de Paula: solo lee Chip ------------------------
+        tst.w   V_AFMT(a4)
+        beq.s   .noabuf
+        move.l  #2*AUD_SAMPLES,d0
+        move.l  #MEMF_CHIP|MEMF_CLEAR,d1
+        jsr     _LVOAllocMem(a6)
+        move.l  d0,V_ABUF(a4)
+        beq     nomem
+        add.l   #AUD_SAMPLES,d0
+        move.l  d0,V_ABUF+4(a4)
+.noabuf:
 
         ;--- bloques de datos ---------------------------------------
         move.l  hdr_data_len(pc),d3
@@ -318,6 +364,22 @@ entry:
         move.l  V_FB+4(a4),a2
         bsr     build_copper
 
+        ;--- audio: el lector recorre los paquetes por su cuenta ----
+        ; Independiente del video: si un frame llega tarde, el audio no se
+        ; entera. Se llena el primer buffer; el otro lo llena la primera
+        ; interrupcion, que llega apenas Paula engancha este.
+        tst.w   V_AFMT(a4)
+        beq.s   .noainit
+        move.l  V_BLK1(a4),V_APKT(a4)
+        lea     header(pc),a0
+        move.l  20(a0),V_ANPKT(a4)
+        clr.l   V_ALEFT(a4)
+        clr.w   V_AACC(a4)
+        move.l  V_ABUF(a4),a0
+        bsr     audio_fill
+        move.w  #1,V_ANEXT(a4)
+.noainit:
+
         ;--- tomar el hardware -------------------------------------
         jsr     _LVOForbid(a6)
         lea     CUSTOM,a0
@@ -329,10 +391,27 @@ entry:
         move.l  $6c.w,V_OLDINT(a4)
         lea     level3(pc),a1
         move.l  a1,$6c.w
+        move.l  $70.w,V_OLDINT4(a4)
+        lea     level4(pc),a1
+        move.l  a1,$70.w
+
+        tst.w   V_AFMT(a4)                    ; Paula, lista pero sin DMA:
+        beq.s   .nopaula                      ; arranca en el VBL del frame 0
+        move.l  V_ABUF(a4),d0
+        move.l  d0,AUD0LC(a0)
+        move.l  d0,AUD1LC(a0)
+        move.w  #AUD_WORDS,AUD0LEN(a0)
+        move.w  #AUD_WORDS,AUD1LEN(a0)
+        move.w  V_APER(a4),AUD0PER(a0)
+        move.w  V_APER(a4),AUD1PER(a0)
+        move.w  #64,AUD0VOL(a0)
+        move.w  #64,AUD1VOL(a0)
+        bclr    #1,CIAA_PRA                   ; filtro pasabajos encendido
+.nopaula:
         move.l  V_COP(a4),COP1LC(a0)
         move.w  d0,COPJMP1(a0)
         move.w  #$8380,DMACON(a0)             ; MASTER|RASTER|COPPER
-        move.w  #$c020,INTENA(a0)             ; INTEN|VERTB
+        move.w  #$c0a0,INTENA(a0)             ; INTEN|AUD0|VERTB
 
         ;--- reproduccion ------------------------------------------
         ; El frame n se ve en el VBL V_START + 2n. Un DELTA se dibuja en el
@@ -346,6 +425,7 @@ entry:
         move.l  V_VBL(a4),d0
         addq.l  #2,d0
         move.l  d0,V_START(a4)
+        move.w  V_AFMT(a4),V_AGO(a4)          ; despues de fijar V_START
 
         lea     header(pc),a0
         move.l  20(a0),d5                     ; d5 = paquetes
@@ -440,6 +520,14 @@ entry:
 .hold:  cmp.l   V_VBL(a4),d0
         bhi.s   .hold
         move.l  V_VBL(a4),V_ENDVBL(a4)
+        ; Se termino: callar a Paula. Primero la interrupcion y despues el
+        ; DMA: al cortar el DMA, Paula pide una interrupcion mas que no es
+        ; un buffer (medido en el Hito 5: aparecia como deriva falsa).
+        lea     CUSTOM,a0
+        move.w  #$0080,INTENA(a0)             ; AUD0
+        move.w  #$0003,DMACON(a0)             ; AUD0EN|AUD1EN
+        move.w  #$0080,INTREQ(a0)
+        move.w  #$0080,INTREQ(a0)
 
         lea     loadcop_end(pc),a0            ; pantalla negra: barra en cero
         move.w  #(BAR_TOP<<8)|$07,(a0)
@@ -487,7 +575,14 @@ level3:
         move.w  d0,INTREQ(a0)
         lea     vars(pc),a1
         addq.l  #1,V_VBL(a1)
-        tst.w   V_PENDING(a1)
+        tst.w   V_AGO(a1)                     ; arrancar el audio con el frame 0
+        beq.s   .noago
+        move.l  V_VBL(a1),d0
+        cmp.l   V_START(a1),d0
+        blt.s   .noago
+        clr.w   V_AGO(a1)
+        move.w  #$8203,DMACON(a0)             ; AUD0EN|AUD1EN
+.noago: tst.w   V_PENDING(a1)
         beq.s   .out
         move.l  V_VBL(a1),d0
         sub.l   V_DUE(a1),d0
@@ -503,6 +598,151 @@ level3:
         move.l  d0,V_MAXLATE(a1)
 .out:   movem.l (sp)+,d0/a0-a1
         rte
+
+;----------------------------------------------------------------------
+; level4 - interrupcion de audio del canal 0. Paula acaba de enganchar el
+; buffer que se le encolo la vez anterior y lo esta tocando; el otro quedo
+; libre. Se lo llena y se lo encola: lo engancha cuando termine este.
+;
+; Llenarlo cuesta ~2 ms. Despues de acusar la interrupcion se baja la
+; prioridad a 2 para que el VBL (nivel 3) pueda interrumpir: si no, el
+; intercambio de copper list podria caer ya dentro de la pantalla.
+;----------------------------------------------------------------------
+level4:
+        movem.l d0-d5/a0-a4,-(sp)
+        lea     CUSTOM,a0
+        move.w  #$0080,INTREQ(a0)             ; AUD0
+        move.w  #$0080,INTREQ(a0)
+        lea     vars(pc),a4
+
+        ifd     BENCH
+        lea     V_ALAST(a4),a1
+        bsr     stamp_irq
+        tst.l   V_ACOUNT(a4)
+        bne.s   .notfirst
+        move.l  V_ALAST(a4),V_AFIRST(a4)
+        move.l  V_ALAST+4(a4),V_AFIRST+4(a4)
+.notfirst:
+        addq.l  #1,V_ACOUNT(a4)
+        endc
+
+        move.w  #$2200,sr                     ; dejar pasar al VBL
+        move.w  V_ANEXT(a4),d0
+        add.w   d0,d0
+        add.w   d0,d0
+        lea     V_ABUF(a4),a0                 ; d8(An,Xn) no llega a 144
+        move.l  0(a0,d0.w),a0
+        bsr     audio_fill
+        lea     CUSTOM,a1
+        move.l  a0,AUD0LC(a1)                 ; los dos canales, mismo buffer
+        move.l  a0,AUD1LC(a1)
+        eor.w   #1,V_ANEXT(a4)
+
+        ifd     BENCH                         ; cuanto costo este llenado
+        move.w  #$2400,sr                     ; sin VBL: stamp_irq corrige un
+        lea     V_AFEND(a4),a1                ; VBL pendiente, no uno que la
+        bsr     stamp_irq                     ; interrumpe a mitad de camino
+        lea     V_ALAST(a4),a0
+        bsr     stamp_diff
+        add.l   d0,V_AFSUM(a4)
+        cmp.l   V_AFMAX(a4),d0
+        bls.s   .notmaxf
+        move.l  d0,V_AFMAX(a4)
+.notmaxf:
+        endc
+
+        movem.l (sp)+,d0-d5/a0-a4
+        rte
+
+;----------------------------------------------------------------------
+; audio_fill - llena un buffer de Paula con las proximas AUD_SAMPLES
+; muestras del flujo de audio. Cuando el flujo se termina, repite la
+; ultima muestra: silencio.
+;   a0 = buffer, a4 = variables. Preserva todo.
+;----------------------------------------------------------------------
+audio_fill:
+        movem.l d0-d5/a0-a3,-(sp)
+        move.w  #AUD_SAMPLES,d5               ; muestras que faltan
+        move.w  V_AACC(a4),d4                 ; acumulador (byte bajo)
+        lea     fibtab(pc),a3
+        move.l  V_APTR(a4),a1
+        move.l  V_ALEFT(a4),d3
+.more:  tst.l   d3
+        bne.s   .have
+        bsr     audio_nextpkt                 ; a1, d3 del paquete siguiente
+        beq.s   .silence                      ; no quedan
+.have:  cmp.w   #AFMT_FIB4,V_AFMT(a4)
+        bne.s   .pcm
+
+.fib:   moveq   #0,d0                         ; fib4: dos muestras por byte,
+        move.b  (a1)+,d0                      ; nibble alto primero
+        move.w  d0,d1
+        lsr.w   #4,d1
+        add.b   0(a3,d1.w),d4
+        move.b  d4,(a0)+
+        and.w   #$000f,d0
+        add.b   0(a3,d0.w),d4
+        move.b  d4,(a0)+
+        subq.l  #1,d3
+        subq.w  #2,d5                         ; paquetes y buffer son pares
+        beq.s   .done
+        tst.l   d3
+        bne.s   .fib
+        bra.s   .more
+
+.pcm:   move.b  (a1)+,d4                      ; pcm8: una muestra por byte
+        move.b  d4,(a0)+
+        subq.l  #1,d3
+        subq.w  #1,d5
+        beq.s   .done
+        tst.l   d3
+        bne.s   .pcm
+        bra.s   .more
+
+.silence:
+        move.b  d4,(a0)+
+        subq.w  #1,d5
+        bne.s   .silence
+.done:  move.l  a1,V_APTR(a4)
+        move.l  d3,V_ALEFT(a4)
+        move.w  d4,V_AACC(a4)
+        movem.l (sp)+,d0-d5/a0-a3
+        rts
+
+;----------------------------------------------------------------------
+; audio_nextpkt - pasa el lector de audio al paquete siguiente.
+;   devuelve a1 = primer byte de audio, d3 = bytes de audio.
+;   Z = 1 si no quedan paquetes.
+;----------------------------------------------------------------------
+audio_nextpkt:
+        movem.l d0/a2,-(sp)
+.again: tst.l   V_ANPKT(a4)
+        beq.s   .end
+        subq.l  #1,V_ANPKT(a4)
+        move.l  V_APKT(a4),a2
+        cmp.l   V_BLK1END(a4),a2              ; fin del bloque 1: seguir en el 2
+        bne.s   .inblk
+        move.l  V_BLK2(a4),a2
+.inblk: moveq   #0,d3
+        move.w  4(a2),d3                      ; bytes de audio
+        lea     6(a2),a1
+        btst    #0,3(a2)                      ; el audio va despues de la paleta
+        beq.s   .nopal
+        move.w  V_NCOLM1(a4),d0
+        addq.w  #1,d0
+        add.w   d0,d0
+        add.w   d0,a1
+.nopal: moveq   #0,d0
+        move.w  (a2),d0
+        add.l   d0,a2
+        move.l  a2,V_APKT(a4)
+        tst.l   d3
+        beq.s   .again                        ; paquete sin audio
+        movem.l (sp)+,d0/a2                   ; movem no toca los flags: Z = 0
+        rts
+.end:   movem.l (sp)+,d0/a2
+        moveq   #0,d3                         ; Z = 1
+        rts
 
 ;----------------------------------------------------------------------
 ; read_chunk - lee CHUNK_BYTES (o lo que quede de disco) al rebote.
@@ -586,6 +826,57 @@ stamp:
         rts
 
 ;----------------------------------------------------------------------
+; stamp_irq - como stamp, pero para usar dentro de la interrupcion de
+; audio, donde la de VBL puede estar pendiente sin atender: si el haz ya
+; volvio arriba y VERTB esta pedido, el VBL ya paso aunque el contador
+; todavia no lo sepa.
+;----------------------------------------------------------------------
+stamp_irq:
+        movem.l d0-d2/a0,-(sp)
+        lea     CUSTOM,a0
+        move.l  V_VBL(a4),d0
+        move.l  VPOSR(a0),d1
+        move.w  INTREQR(a0),d2
+        btst    #5,d2
+        beq.s   .ok
+        move.l  d1,d2
+        lsr.l   #8,d2
+        and.w   #$01ff,d2
+        cmp.w   #156,d2
+        bhs.s   .ok
+        addq.l  #1,d0
+.ok:    move.l  d0,(a1)
+        move.l  d1,d0
+        lsr.l   #8,d0
+        and.w   #$01ff,d0
+        move.w  d0,4(a1)
+        and.w   #$00ff,d1
+        move.w  d1,6(a1)
+        movem.l (sp)+,d0-d2/a0
+        rts
+
+;----------------------------------------------------------------------
+; stamp_diff - d0 = color clocks entre la estampa (a0) y la (a1), que
+; tienen que estar a pocos frames una de otra.
+;----------------------------------------------------------------------
+stamp_diff:
+        move.l  d1,-(sp)
+        move.l  (a1),d0
+        sub.l   (a0),d0                       ; frames
+        mulu    #313,d0
+        move.w  4(a1),d1
+        sub.w   4(a0),d1
+        ext.l   d1
+        add.l   d1,d0                         ; lineas
+        muls    #227,d0
+        move.w  6(a1),d1
+        sub.w   6(a0),d1
+        ext.l   d1
+        add.l   d1,d0
+        move.l  (sp)+,d1
+        rts
+
+;----------------------------------------------------------------------
 ; elapsed - d0 = color clocks entre V_STAMP0 y V_STAMP1.
 ; Frame PAL no entrelazado: 313 lineas de 227 color clocks.
 ;----------------------------------------------------------------------
@@ -615,6 +906,7 @@ bench_finish:
         move.w  #$7fff,INTENA(a0)
         move.w  #$7fff,INTREQ(a0)
         move.l  V_OLDINT(a4),$6c.w
+        move.l  V_OLDINT4(a4),$70.w
         move.w  V_OLDDMA(a4),d0
         and.w   #$ffdf,d0                     ; sin sprites: no hay punteros
         or.w    #$8000,d0
@@ -668,6 +960,21 @@ bench_finish:
         move.b  IO_ERROR(a1),d0
         move.l  d0,(a0)
 
+        lea     infobuf(pc),a0                ; audio (desde el offset 76)
+        move.l  V_ACOUNT(a4),76(a0)
+        move.l  V_AFIRST(a4),80(a0)
+        move.l  V_AFIRST+4(a4),84(a0)
+        move.l  V_ALAST(a4),88(a0)
+        move.l  V_ALAST+4(a4),92(a0)
+        move.l  V_START(a4),96(a0)
+        moveq   #0,d0
+        move.w  V_AFMT(a4),d0
+        move.l  d0,100(a0)
+        move.w  V_APER(a4),d0
+        move.l  d0,104(a0)
+        move.l  V_AFSUM(a4),108(a0)
+        move.l  V_AFMAX(a4),112(a0)
+
         move.l  V_IOREQ(a4),a1
         move.w  #CMD_WRITE,IO_COMMAND(a1)
         move.l  #512,IO_LENGTH(a1)
@@ -700,6 +1007,8 @@ header:     ds.b    HDR_SIZE
 vars:       ds.b    VARS_SIZE
 palbuf:     ds.w    16
 dbltab:     ds.w    256
+fibtab:     dc.b    -34,-21,-13,-8,-5,-3,-2,-1,0,1,2,3,5,8,13,21
+        even
 
 ;----------------------------------------------------------------------
 ; Copper list de la carga (y de la pantalla negra del final). Sin

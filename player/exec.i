@@ -58,6 +58,17 @@ INTREQR             equ $01e
 CIAA_TODHI          equ $bfea01         ; leer el alto congela hasta leer el bajo
 CIAA_TODMID         equ $bfe901
 CIAA_TODLO          equ $bfe801
+CIAA_PRA            equ $bfe001         ; bit 1 = LED y filtro (0 = encendido)
+
+; --- Paula ---
+AUD0LC              equ $0a0
+AUD0LEN             equ $0a4
+AUD0PER             equ $0a6
+AUD0VOL             equ $0a8
+AUD1LC              equ $0b0
+AUD1LEN             equ $0b4
+AUD1PER             equ $0b6
+AUD1VOL             equ $0b8
 INTENA              equ $09a
 INTREQ              equ $09c
 COP1LC              equ $080

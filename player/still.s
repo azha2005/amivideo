@@ -66,7 +66,7 @@ entry:
         ;--- cabecera del bitstream ---------------------------------
         cmp.l   #$41355650,(a3)               ; "A5VP"
         bne     badhdr
-        cmp.w   #2,4(a3)                      ; version de formato
+        cmp.w   #3,4(a3)                      ; version de formato
         bne     badhdr
         moveq   #0,d6
         move.b  12(a3),d6                     ; bitplanes
