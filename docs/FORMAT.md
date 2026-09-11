@@ -1,16 +1,19 @@
 # Formato del disco de A500VP
 
-**Version de formato: 0 (Hito 0).** Todavia no hay bitstream de video; esto
-define solo el disco y el arranque. El formato de paquetes se agrega en el
-Hito 2 y sube la version.
+**Version de formato: 2.** Define el disco, el arranque y el bitstream de
+video. El audio tiene su lugar reservado en cada paquete pero todavia viaja
+vacio (Hito 5).
 
 Todo es **big-endian**. El 68000 lee el disco con punteros pelados, sin
 conversiones.
 
 Este archivo es la unica definicion del formato. El encoder
-(`encoder\adf.c`), el decoder de referencia y el reproductor
-(`player\*.s`) lo siguen al pie de la letra. Si cambia el formato, cambia la
-version.
+(`encoder\encode.c`, `encoder\stream.c`), el decoder de referencia
+(`encoder\decode.c`) y el reproductor (`player\*.s`) lo siguen al pie de la
+letra. Si cambia el formato, cambia la version.
+
+La version 1 (delta por tramos "saltar N, escribir M" por plano) quedo
+obsoleta; por que, con numeros, en `DECISIONS.md`.
 
 ---
 
@@ -24,7 +27,7 @@ no es un volumen valido y esta bien.
 |---|---|
 | 0–1 | Bootblock (1024 bytes) |
 | 2 … | Reproductor, en sectores consecutivos |
-| … | Datos (desde el Hito 2) |
+| … | Datos de video (cabecera + paquetes); ubicacion exacta en el Hito 4 |
 | 1759 | Sector de diagnostico del Hito 0 (`MEMR`) |
 
 ---
@@ -51,10 +54,8 @@ que se guarda en el offset 4 es el complemento a uno (NOT) de esa suma.
 
 La comprobacion que hace el Kickstart es sumar las 256 longwords *incluido* el
 checksum y exigir `$FFFFFFFF`. `adf_boot_valid()` implementa exactamente eso y
-`mkadf` lo verifica antes de escribir el archivo.
-
-Se valido contra bootblocks reales generados por `xdftool` (los ADF del
-proyecto `amiga260k`): los tres dan `$FFFFFFFF`.
+`mkadf` lo verifica antes de escribir el archivo. Se valido contra bootblocks
+reales generados por `xdftool`.
 
 ### Que hace el codigo de arranque
 
@@ -70,9 +71,115 @@ Entra con `A1` = `IOStdReq` de trackdisk.device (unidad 0, ya abierto) y
    `A6` = ExecBase, `A1` = el mismo `IOStdReq`, `A0` = base del reproductor.
 
 Si falta memoria o falla la lectura, pone el borde en rojo y se queda quieto.
+El reproductor es **codigo independiente de posicion**.
 
-El reproductor es **codigo independiente de posicion**: se ejecuta donde
-AllocMem lo haya dejado.
+---
+
+## Bitstream de video
+
+### Cabecera (32 bytes)
+
+| Offset | Tamano | Contenido |
+|---|---|---|
+| 0 | 4 | `"A5VP"` |
+| 4 | 2 | Version = 2 |
+| 6 | 2 | Flags. Bit 0 = hay audio (en v2 siempre 0) |
+| 8 | 2 | Ancho logico = 160 |
+| 10 | 2 | Alto logico = 128 |
+| 12 | 1 | Bitplanes (1..4) |
+| 13 | 1 | Colores = 2^bitplanes |
+| 14 | 2 | Periodo de Paula del audio (0 = sin audio) |
+| 16 | 2 | Primera fila logica activa (`y0`) |
+| 18 | 2 | Ultima fila activa + 1 (`y1`) |
+| 20 | 4 | Cantidad de paquetes = cantidad de frames |
+| 24 | 4 | Bytes de paquetes que siguen a la cabecera |
+| 28 | 4 | Reservado, 0 |
+
+Las filas fuera de `y0..y1-1` son las barras del letterbox: nunca cambian y
+quedan en el color 0.
+
+### Paquetes
+
+Un paquete por frame, sin excepcion. **Cada paquete dura exactamente 2 VBL**
+(1/24,960205 s). No hay paquetes de "repetir K frames": si hay que sostener
+una imagen K frames, van K paquetes de repeticion. Asi el audio de cada frame
+viaja en su propio paquete y la sincronia es trivial.
+
+| Offset | Tamano | Contenido |
+|---|---|---|
+| 0 | 2 | Longitud total del paquete en bytes, incluido este campo. **Siempre par** |
+| 2 | 1 | Operacion: 0 = DELTA, 1 = REPETICION |
+| 3 | 1 | Flags. Bit 0 = trae paleta |
+| 4 | 2 | Bytes de audio en este paquete |
+| 6 | … | Paleta: `colores` x 2 bytes, RGB444 como `$0RGB` (si el bit 0 esta prendido) |
+| … | … | Audio (los bytes indicados en el offset 4) |
+| … | … | Delta (solo si la operacion es DELTA) |
+| … | 0–1 | Relleno con cero hasta longitud par |
+
+El audio va **antes** del video para que el reproductor lo encuentre en un
+offset que se calcula sin recorrer el delta.
+
+Como todos los paquetes tienen longitud par y prefijo de longitud, el cargador
+puede recorrerlos y partir los datos en dos bloques de memoria en un limite de
+paquete, sin mirar su contenido.
+
+Un cambio de paleta siempre viaja con un DELTA: una REPETICION nunca trae
+paleta.
+
+### Delta
+
+| Tamano | Contenido |
+|---|---|
+| 16 | Mapa de filas: 128 bits, uno por fila logica |
+| … | Por cada fila marcada, en orden ascendente: el bloque de fila |
+
+Mapa de filas: el byte `i` cubre las filas `8i..8i+7`; el bit 7 es la fila
+`8i`.
+
+Bloque de fila:
+
+| Tamano | Contenido |
+|---|---|
+| 3 | Mascara de columnas: 20 bits, uno por byte logico de la fila |
+| … | Por cada columna marcada, en orden ascendente: `bitplanes` bytes, plano 0 primero |
+
+Mascara de columnas: el bit 7 del primer byte es la columna 0 (pixeles
+logicos 0..7), el bit 0 del segundo byte es la columna 15, y en el tercer
+byte los bits 7..4 son las columnas 16..19. **Los bits 3..0 del tercer byte
+tienen que valer 0**; el decoder de referencia rechaza el delta si no.
+
+Cada byte de plano son 8 pixeles logicos, el bit 7 es el de mas a la
+izquierda (como lo lee Denise).
+
+Una columna marcada lleva **todos** los planos, aunque alguno no haya
+cambiado: medido, en una fila modificada cambian en promedio 2,84 de 3
+planos, y escribir el plano que sobra sale mas barato que describir cuales
+cambiaron.
+
+### Semantica (lo que hace el reproductor)
+
+- Hay dos framebuffers planares, A y B, cada uno con su copper list. Al
+  empezar los dos estan en cero (negro) y se ve A.
+- **DELTA:** se escriben los bytes en el buffer **oculto**. Cada byte logico
+  se expande a una palabra con la tabla de doblado de 256 entradas (cada
+  pixel logico ocupa 2 pixeles de pantalla). Si el paquete trae paleta, se
+  escribe en el copper list del buffer oculto. En el vertical blank se
+  intercambian los buffers escribiendo `COP1LC`. Despues del intercambio la
+  paleta se copia tambien al copper list del otro buffer, para que los dos la
+  tengan.
+- **REPETICION:** no se toca nada y no se intercambia: se sigue viendo el
+  mismo buffer.
+- El delta de un frame es contra el contenido del buffer oculto, que es el
+  penultimo frame **distinto** mostrado (las repeticiones no intercambian).
+- Cada fila logica se ve dos veces (doblado vertical por Copper; Hito 3).
+
+### Verificacion
+
+El encoder escribe junto al bitstream un archivo `<salida>.crc`: un CRC-32
+big-endian por frame, calculado sobre el mapa de indices visible
+(160 x 128 bytes, un indice de paleta por pixel logico) seguido de la paleta
+visible serializada en big-endian. El decoder de referencia recalcula lo
+mismo a partir del bitstream y tiene que coincidir en **todos** los frames.
 
 ---
 

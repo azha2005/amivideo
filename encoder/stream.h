@@ -8,11 +8,13 @@
 #include "a500vp.h"
 
 #define A5V_MAGIC        "A5VP"
-#define A5V_VERSION      1
+#define A5V_VERSION      2
 #define A5V_HEADER_SIZE  32
 
+#define A5_MAX_PLANES    4
 #define A5_ROWBYTES      (A5_W / 8)          /* 20 bytes logicos por fila */
 #define A5_ROWMASK_SIZE  (A5_H / 8)          /* 16 bytes de mapa de filas */
+#define A5_COLMASK_SIZE  3                   /* 20 bits de columnas, en 3 bytes */
 
 /* op del paquete */
 #define A5V_OP_DELTA     0
@@ -27,17 +29,23 @@
 
 /* --- modelo de costo de decodificacion ---------------------------------
  * SIN CALIBRAR. Los numeros salen de contar ciclos del 68000 a mano sobre el
- * lazo interno previsto (move.b (a0)+,d0 / add.w d0,d0 / lookup en la tabla
- * de doblado / move.w a chip RAM / dbf). No incluyen la contienda de DMA con
- * los bitplanes, que puede ser significativa. Se calibra en el Hito 4
- * midiendo el reproductor de verdad en WinUAE cycle-exact.
+ * lazo previsto para el formato v2:
+ *   por fila modificada : cargar la mascara de columnas y un puntero por
+ *                         plano
+ *   por columna recorrida (20 por fila): add.b/bcc sobre la mascara y
+ *                         avanzar los punteros de plano
+ *   por byte literal    : move.b (a0)+,d0 / add.w d0,d0 /
+ *                         move.w 0(a5,d0.w),(aN)+   = 8 + 4 + 18 = 30
+ *                         mas algo de contienda con el DMA de bitplanes.
+ * Se calibra en el Hito 4 midiendo el reproductor de verdad en WinUAE
+ * cycle-exact.
  */
 #define A5_CPU_HZ            7093790.0
 #define A5_CYC_FRAME         2000
-#define A5_CYC_ROW           60
-#define A5_CYC_PLANE         40
-#define A5_CYC_RUN           50
-#define A5_CYC_BYTE          50
+#define A5_CYC_ROW           80
+#define A5_CYC_COLSCAN       14
+#define A5_CYC_COL           20
+#define A5_CYC_BYTE          36
 #define A5_FRAME_BUDGET_CYC  ((long)(A5_CPU_HZ * 0.040))
 
 /* --- buffer de bytes que crece ----------------------------------------- */
@@ -60,9 +68,8 @@ void a5_depack_row(const uint8_t *planar, int planes, uint8_t *idx_row);
 /* --- delta -------------------------------------------------------------- */
 typedef struct {
     int  rows;        /* filas logicas modificadas */
-    int  planerows;   /* pares (fila, plano) con datos */
-    int  runs;
-    int  bytes;       /* bytes literales escritos */
+    int  cols;        /* columnas (byte logico x todos los planos) escritas */
+    int  bytes;       /* bytes literales escritos = cols * planos */
     long cycles;      /* costo estimado de decodificacion */
 } A5DeltaStats;
 
