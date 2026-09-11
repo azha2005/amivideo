@@ -11,7 +11,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('build', 'run', 'check', 'still', 'clean')]
+    [ValidateSet('build', 'run', 'check', 'still', 'play', 'clean')]
     [string]$Task = 'build',
 
     [string]$Vasm   = 'C:\Users\JC\vbcc\bin\vasmm68k_mot.exe',
@@ -24,8 +24,14 @@ param(
     [int]$Timeout = 25,
 
     # Hito 3: bitstream del que sale el frame fijo, y cual frame.
+    # Hito 4: el mismo bitstream es el que se reproduce.
     [string]$Stream = 'work\final22.a5v',
-    [int]$Frame = 182
+    [int]$Frame = 182,
+
+    # Hito 4: cuanto dejar correr el disco de medicion (carga + video +
+    # grabacion de mediciones) y cada cuanto capturar la ventana.
+    [int]$PlayWait = 150,
+    [int]$ShotEvery = 10
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,8 +73,19 @@ function Build-All {
                         '-o', (Join-Path $work 'memcheck.bin'),
                         (Join-Path $player 'memcheck.s'))
 
+    # Hito 3: disco de prueba del frame fijo (regresion del decodificador)
+    Invoke-Tool $Vasm @('-Fbin', '-m68000', '-no-opt', '-I', $player,
+                        '-o', (Join-Path $work 'still.bin'),
+                        (Join-Path $player 'still.s'))
+
+    # El reproductor, y su version de medicion (-DBENCH)
     Invoke-Tool $Vasm @('-Fbin', '-m68000', '-no-opt', '-I', $player,
                         '-o', (Join-Path $work 'player.bin'),
+                        (Join-Path $player 'player.s'))
+
+    Invoke-Tool $Vasm @('-Fbin', '-m68000', '-no-opt', '-I', $player,
+                        '-DBENCH=1',
+                        '-o', (Join-Path $work 'player_bench.bin'),
                         (Join-Path $player 'player.s'))
 
     Invoke-Tool $Gcc @('-std=c11', '-O2', '-Wall', '-Wextra', '-pedantic',
@@ -302,7 +319,7 @@ switch ($Task) {
         $adf = Join-Path $work 'still.adf'
         Invoke-Tool (Join-Path $work 'mkadf.exe') @(
             '--boot',   (Join-Path $work 'boot.bin'),
-            '--player', (Join-Path $work 'player.bin'),
+            '--player', (Join-Path $work 'still.bin'),
             '--data',   $still,
             '--reserve-tail', '41',
             '--out',    $adf)
@@ -315,6 +332,37 @@ switch ($Task) {
         & ffmpeg -v error -y -i "$still.ppm" (Join-Path $work 'still_ref.png')
         Write-Host "referencia : $(Join-Path $work 'still_ref.png')"
         if (-not (Test-Still $r.Adf $still)) { exit 1 }
+    }
+
+    'play' {
+        Build-All
+        $streamPath = if ([System.IO.Path]::IsPathRooted($Stream)) { $Stream } else { Join-Path $root $Stream }
+        if (-not (Test-Path $streamPath)) {
+            throw "No existe $streamPath. Generalo con a500vp-enc (ver docs\SETUP.md)."
+        }
+        $adf = Join-Path $work 'play.adf'
+        Invoke-Tool (Join-Path $work 'mkadf.exe') @(
+            '--boot',   (Join-Path $work 'boot.bin'),
+            '--player', (Join-Path $work 'player_bench.bin'),
+            '--data',   $streamPath,
+            '--reserve-tail', '41',
+            '--out',    $adf)
+
+        # Una carpeta con marca de tiempo por corrida, para no mezclar
+        # capturas viejas con nuevas.
+        $shots = Join-Path $work ('shots\' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        New-Item -ItemType Directory -Force $shots | Out-Null
+        $r = Start-Emulator -Headless -AdfPath $adf
+        Write-Host "Corriendo $PlayWait s (carga + reproduccion + grabacion de mediciones)..."
+        $t0 = Get-Date
+        while ((((Get-Date) - $t0).TotalSeconds -lt $PlayWait) -and -not $r.Process.HasExited) {
+            Start-Sleep -Seconds $ShotEvery
+            $sec = [int]((Get-Date) - $t0).TotalSeconds
+            Save-WindowShot $r.Process (Join-Path $shots ('{0:d3}s.png' -f $sec)) | Out-Null
+        }
+        Write-Host "capturas   : $shots"
+        Stop-Emulator $r.Process
+        Invoke-Tool (Join-Path $work 'a500vp-dec.exe') @('--in', $streamPath, '--measure', $r.Adf)
     }
 
     'check' {
