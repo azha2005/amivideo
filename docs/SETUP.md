@@ -39,15 +39,21 @@ es V36 (Kickstart 2.0) y no se puede usar.
 ## Comandos
 
 ```powershell
-.\build.ps1              # ensambla, compila y genera work\a500vp.adf
-.\build.ps1 run          # ademas lo arranca en WinUAE y te deja mirarlo
+.\build.ps1              # ensambla y compila todo, y el disco del Hito 0
+                         # (work\memcheck.adf)
+.\build.ps1 disk -Video "C:\ruta\al\opening.mp4"
+                         # EL DISCO: work\a500vp.adf, con video y audio.
+                         # Deja work\video.a5v, lo verifica con el decoder de
+                         # referencia y saca work\preview.mp4 con el audio
+                         # tal como va a sonar. -Duration 22 por defecto
+.\build.ps1 run          # arranca en WinUAE el disco del Hito 0
 .\build.ps1 check        # lo arranca, lo cierra y te imprime la medicion
 .\build.ps1 still        # Hito 3: frame fijo en WinUAE, verificado byte a byte
-                         # (-Stream work\final22.a5v -Frame 182 por defecto)
-.\build.ps1 play         # Hito 4: disco de medicion. Carga y reproduce el
-                         # stream entero (~2,5 min), captura la ventana cada
-                         # -ShotEvery s en work\shots\ y ajusta el modelo de
-                         # costo con lo que midio la Amiga
+                         # (-Stream work\video.a5v -Frame 182 por defecto)
+.\build.ps1 play         # Hitos 4 y 5: disco de medicion. Carga y reproduce
+                         # work\video.a5v entero (~2,5 min), captura la
+                         # ventana cada -ShotEvery s en work\shots\, ajusta
+                         # el modelo de costo y mide la sincronia del audio
 .\build.ps1 clean        # borra work\
 
 .\tools\shot.ps1         # arranca WinUAE y saca una captura a work\shot.png
@@ -59,21 +65,25 @@ Rutas pisables: `-Vasm`, `-Gcc`, `-WinUAE`, `-Rom`, `-Timeout`.
 
 `build.ps1` compila tambien `work\a500vp-enc.exe` y `work\a500vp-dec.exe`.
 
-```powershell
-# bitstream de los primeros 22 s. Los defaults son los parametros elegidos
-# en el Hito 2 (8 colores, realce 1.2, hold 2, histeresis 0.07) y el
-# presupuesto por defecto ya descuenta el audio.
-.\work\a500vp-enc.exe --in "C:\ruta\al\opening.mp4" --duration 22 `
-    --out work\video.a5v
+`build.ps1 disk` hace esto mismo; a mano sirve para probar opciones.
 
-# reconstruirlo, verificarlo contra el encoder y sacar el preview con audio
-.\work\a500vp-dec.exe --in work\video.a5v --preview work\preview.mp4 `
-    --audio "C:\ruta\al\opening.mp4" --audio-duration 22
+```powershell
+# bitstream y disco de los primeros 22 s. Los defaults son los parametros
+# elegidos en el Hito 2 (8 colores, realce 1.2, hold 2, histeresis 0.07) y
+# audio fib4 a 8006,5 Hz. Con --adf el presupuesto es exactamente lo que
+# queda en el disco despues del reproductor, audio incluido.
+.\work\a500vp-enc.exe --in "C:\ruta\al\opening.mp4" --duration 22 `
+    --out work\video.a5v --adf work\a500vp.adf
+
+# reconstruirlo, verificarlo contra el encoder y sacar el preview con el
+# audio decodificado del bitstream (fib4 incluido)
+.\work\a500vp-dec.exe --in work\video.a5v --preview work\preview.mp4
 ```
 
 El decoder termina con `VERIFICACION: OK` si reconstruyo todos los frames
-exactamente igual que los simulo el encoder, y sale con codigo 1 si no.
-`a500vp-enc --help` lista todas las opciones.
+exactamente igual que los simulo el encoder (y, si hay audio, todas las
+muestras), y sale con codigo 1 si no. `a500vp-enc --help` lista todas las
+opciones.
 
 ## WinUAE
 

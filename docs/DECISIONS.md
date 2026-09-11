@@ -484,6 +484,9 @@ audio que se va a llevar la duracion real en pantalla, a fib4 (4 bits por
 muestra) y 3546895/`--audio-period` Hz. Para 22 s: 883 712 − 88 213 =
 **795 499 bytes**.
 
+*Reemplazado en el Hito 5:* el audio viaja dentro de los paquetes y el
+presupuesto es uno solo (ver "Presupuesto unico" mas abajo).
+
 ---
 
 ## 2026-09-11 — El control de tasa deja presupuesto sin usar
@@ -635,9 +638,203 @@ sin implementar: con estos numeros no hace falta.
 
 ---
 
+## 2026-09-11 — Hito 5: el audio es un solo flujo continuo (formato v3)
+
+**Decision:** el audio de todos los paquetes, puesto uno detras del otro, es
+un unico flujo. El paquete `n` lleva las muestras `S(n-1)..S(n)-1`, con
+`S(n) = 2 floor((n+1) x Hz_Paula / 24,960205 / 2)`: acumulacion fraccional
+con las frecuencias exactas, redondeada a una cantidad par. En fib4 el
+acumulador arranca en 0 y **sigue de un paquete al otro**. La cabecera gana
+un byte de formato (offset 28: 0 ninguno, 1 fib4, 2 pcm8) y la version pasa
+a 3. Todo en `FORMAT.md`.
+
+**Motivos:**
+
+- Muestras pares por paquete: en fib4 un paquete termina en un byte entero,
+  y en el reproductor no hace falta llevar la cuenta de medio byte.
+- Acumulador continuo: si se reiniciara en cada paquete, cada 40 ms habria
+  un salto al centro, que suena como un zumbido de 25 Hz.
+- El lector de audio del reproductor camina los paquetes por su cuenta,
+  independiente del video. Si un frame llega tarde, el audio no se entera:
+  la politica que pedia `CLAUDE.md` sale gratis.
+- El error acumulado por el redondeo a par es siempre menor que 2 muestras
+  (0,25 ms), dure lo que dure el video.
+
+El encoder escribe en el `.crc` un CRC mas, el de todas las muestras que
+tienen que sonar. El decoder de referencia decodifica el audio del bitstream
+como el reproductor, lo compara (**176 424 muestras identicas** en el opening
+de 22 s) y lo mezcla en el preview: lo que se oye en `preview.mp4` es fib4 de
+verdad, no la fuente.
+
+---
+
+## 2026-09-11 — Remuestreo fino en C, no en ffmpeg
+
+ffmpeg solo entrega frecuencias enteras, y Paula con periodo 443 toca a
+8006,535 Hz. Pedirle 8006 o 8007 dejaria una deriva de 1,5 ms por minuto que
+no hace falta. El encoder le pide a ffmpeg la entera de arriba (8007 Hz, con
+su filtro antialias, que es bueno) y hace el ultimo paso con interpolacion
+lineal a la frecuencia **exacta**. La razon es 1,00006: la interpolacion casi
+no filtra y la duracion cuadra al microsegundo con la del video.
+
+Con `--rate pal` (video 4 % mas rapido) el audio se lee mas rapido y sube de
+tono como en la TV; se le pide a ffmpeg 8006,5/1,041 Hz para que el
+antialias corte donde corresponde despues de acelerar. Con la cadencia
+`native` que eligio Az no se toca.
+
+---
+
+## 2026-09-11 — fib4: la ganancia optima es 1, y subirla empeora
+
+El opening llega a pico 38 de 127 en 8 bits (−10 dB). Lo obvio seria
+normalizar, pero fib4 no puede subir mas de 21 ni bajar mas de 34 por
+muestra: con mas amplitud, los agudos fuertes no alcanzan (sobrecarga de
+pendiente). Medido sobre los 22 s, SNR de lo que suena contra la entrada:
+
+| ganancia | pico | SNR fib4 | SNR pcm8 |
+|---|---|---|---|
+| 0,5 | 19 | 19,7 dB | |
+| 0,85 | 33 | 20,8 dB | |
+| **1,0** | 38 | **20,9 dB** | 28,4 dB |
+| 1,25 | 48 | 20,8 dB | |
+| 2,0 | 77 | 17,8 dB | |
+| 3,3 | 126 | 12,1 dB | 38,8 dB |
+
+Meseta entre 0,85 y 1,25; queda **1,0** (`--audio-gain`). pcm8 a 3,3 suena
+mucho mejor (38,8 dB) pero ocupa el doble: 176 KB en vez de 88, o sea 88 KB
+menos de video (11 %). Queda como opcion (`--audio-format pcm8
+--audio-gain 3.3`); es una decision de Az, no tecnica.
+
+El codificador fib4 es codicioso (el mejor nibble para cada muestra, sin
+mirar adelante). Uno con busqueda hacia adelante daria varios dB mas al
+mismo tamano, sin tocar el formato ni el reproductor: candidato para el
+Hito 6.
+
+---
+
+## 2026-09-11 — Presupuesto unico y el disco lo arma el encoder
+
+**Decision:** `--budget` cuenta cabecera mas paquetes, **audio incluido**. El
+audio no se negocia con el control de tasa: se codifica primero y el video
+se ajusta a lo que queda. Con `--adf`, el encoder arma el disco entero
+(bootblock, reproductor, datos) y el presupuesto por defecto es exactamente
+lo que queda en el disco despues del reproductor, no una estimacion.
+
+La memoria no limita: en el Hito 0 se midieron 975 KB libres entre Chip y
+slow. Descontando framebuffers, copper lists, buffers de Paula, rebote,
+reproductor y el margen de Chip quedan ~915 KB para datos, contra 872 KB de
+disco.
+
+`build.ps1 disk` reserva al final del disco lo que necesita el disco de
+medicion para usar **el mismo** `video.a5v`: su reproductor ocupa 7 sectores
+mas (tablas de tiempos) y graba 6 sectores de resultados. Son 13 sectores,
+6,5 KB. Para el disco final se podria recuperar, pero entonces lo que se
+mide no es lo que se graba.
+
+Resultado con el opening de 22 s: 889 856 bytes de presupuesto, 88 212 de
+audio y 862 380 usados. Sobran 27 KB: la busqueda del control de tasa
+arranca en `--quality 8` y solo sabe subir la perdida, y a esa calidad ya
+entra. Aprovechar ese resto es trabajo del Hito 6.
+
+---
+
+## 2026-09-11 — Hito 5: audio en el reproductor y sincronia medida
+
+**Diseno.** Dos buffers de 512 muestras en Chip (64 ms cada uno a
+8006,5 Hz). Paula toca uno mientras la interrupcion de nivel 4 (AUD0) llena
+el otro y lo encola en `AUD0LC`/`AUD1LC`: los dos canales tocan el mismo
+buffer, uno de cada lado. El lector de audio recorre los paquetes por su
+cuenta, con su propio puntero (pasa del bloque 1 al 2 en el mismo limite que
+el video), y de cada paquete solo mira los bytes de audio. Cuando el flujo se
+acaba repite la ultima muestra: silencio. El DMA de audio arranca dentro de
+la interrupcion de VBL del frame 0. El filtro pasabajos queda encendido.
+
+Al empezar a llenar, el nivel 4 baja la prioridad a 2 (`move.w #$2200,sr`):
+llenar dura 4,5 ms, y sin eso el VBL se atrasaria y el intercambio de copper
+list podria caer ya dentro de la pantalla.
+
+**Medido** con el disco de medicion (WinUAE A500 cycle-exact, KS 1.2):
+
+| | |
+|---|---|
+| Buffers pedidos por Paula | 345, exactamente los que caben en 1100 VBL |
+| Primer buffer | 0,12 ms despues del VBL del frame 0 |
+| Intervalo medio | 226 814,1 color clocks (esperado 512 x 443 = 226 816) |
+| Diferencia acumulada | −0,185 ms en 22 s |
+| Fin del audio contra fin del video | 0,04 ms |
+| Reproduccion | 1100 VBL para 1100; 1 frame tarde por 2 VBL, el que predice el encoder |
+| Llenar un buffer fib4 | 4,51 ms de media (32 015 ciclos), 4,63 el peor: **7,1 % de la CPU** |
+
+**Sin deriva perceptible.** −0,185 ms en 22 s son 1,5 muestras en total, no
+por buffer. Encaja con que Paula pida la primera interrupcion un periodo de
+muestra mas tarde que las siguientes (un corrimiento fijo). Con solo la
+primera y la ultima estampa no se lo puede separar de una deriva lenta, pero
+aun si lo fuera serian 0,5 ms por minuto, cien veces menos de lo que se
+nota.
+
+**Bug encontrado midiendo.** La primera corrida daba −27 ms de "deriva": 346
+interrupciones en vez de 345, la ultima justo al terminar. El reproductor
+cortaba el DMA de audio antes de deshabilitar la interrupcion, y al cortar el
+DMA Paula pide una interrupcion mas. Ahora se deshabilita primero y se acusa
+la pendiente.
+
+**El modelo de costo, con audio.** Con el audio la decodificacion media paso
+de 34,9 a 37,6 ms y el peor delta de 60,3 a 65,2 ms: cada llenado le roba
+tiempo al delta que este en curso. El encoder ahora lo simula: los llenados
+llegan cada 512 x periodo color clocks desde el VBL del frame 0, cada uno
+cuesta `A5_CYC_AUDIO_FILL` = 32 300 ciclos (32 015 medidos dentro de la
+rutina, mas ~300 de entrar y salir de la interrupcion, contados a mano), y
+un delta que empieza con un llenado en curso espera a que termine.
+
+Validacion contra los 253 deltas medidos, reconstruyendo la linea de tiempo
+del reproductor con los tiempos de la Amiga:
+
+- el modelo predice en promedio el **99,9 %** de lo medido (sin el audio,
+  93,7 %);
+- la reconstruccion da 1 frame tarde, lo mismo que conto la Amiga;
+- descontando los llenados, el ajuste da `4202 + 885,5 x filas + 176,5 x
+  columnas` (R2 = 0,9981). Para un frame completo difiere del Hito 4 en un
+  0,01 %: se mantienen las constantes del Hito 4, medidas sin el ruido del
+  audio;
+- el residuo maximo, 4,4 ms, es un caso de borde: el delta del frame 26
+  empieza justo cuando llega el primer llenado, 0,12 ms despues del VBL, y
+  no se puede saber si la estampa quedo antes o despues. Ahi el modelo
+  sobreestima: se equivoca del lado seguro.
+
+Con el costo del audio en la linea de tiempo, el encoder produce **el mismo
+stream, byte por byte**, que el que se midio: no hubo que degradar nada. La
+medicion valida al encoder tal como queda.
+
+**pcm8, medido igual** (el opening con `--audio-format pcm8 --audio-gain
+3.3`): llenar un buffer cuesta 3,94 ms (27 918 ciclos, el peor 4,05 ms), el
+**6,2 %** de la CPU; `A5_CYC_AUDIO_FILL_PCM8` = 28 200. Sincronia identica a
+fib4 (345 buffers, −0,186 ms). La Amiga mostro 4 frames tarde, por 2 VBL el
+peor, y la reconstruccion da los mismos 4; con la constante, el encoder
+predice esos mismos 4 y genera el mismo stream que se midio, byte por byte
+(el modelo da el 99,9 % de lo medido). pcm8 casi no ahorra CPU porque el
+bucle es de a una muestra; copiar de a palabras lo bajaria a una decima.
+
+**Segundo bug encontrado midiendo.** La primera medicion de pcm8 dio "el
+peor llenado: 1 210 893 ms". La estampa de salida del llenado se tomaba con
+la prioridad ya bajada a 2, y el VBL podia entrar entre la lectura del
+contador de VBL y la de la posicion del haz: estampa un frame atrasada, resta
+negativa. `stamp_irq` corrige un VBL pendiente, no uno que la interrumpe a
+mitad. Ahora se vuelve a prioridad 4 antes de estampar, y el decoder avisa si
+un llenado mide mas de un frame. Solo afecta al disco de medicion. La media
+de fib4 es limpia (su peor llenado, 4,63 ms, es posible); la de pcm8 se
+repitio.
+
+**7 % de CPU es bastante.** El bucle fib4 hace por byte dos sumas con tabla,
+un corrimiento y una mascara. Con dos tablas de 256 bytes (el paso del nibble
+alto y el del bajo, indexadas por el byte entero) bajaria casi a la mitad.
+Hoy no hace falta, porque no cambia el atraso previsto; queda anotado.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
 - ~~Costo de decodificacion por frame.~~ Medido y calibrado en el Hito 4.
 - ~~WAIT horizontal del Copper para el doblado vertical.~~ Resuelto en el
   Hito 3 con el truco del modulo (ver arriba).
+- ~~Sincronia de audio y costo del audio en la CPU.~~ Medidos en el Hito 5.
