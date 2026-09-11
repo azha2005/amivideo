@@ -550,13 +550,94 @@ el programa. Salio al escribir el volcado del Hito 3, que hace lo mismo.
 
 ---
 
+## 2026-09-11 — Hito 4: carga y reproduccion medidas
+
+**Metodo:** disco de medicion (`build.ps1 play`). El reproductor ensamblado
+con `-DBENCH=1` carga `final22.a5v` (22 s, 774 048 bytes), lo reproduce
+entero, le devuelve la maquina al sistema y graba en el disquete lo que
+midio (formato en `FORMAT.md`). La carga se cronometra con el TOD del CIA-A
+(cuenta VSYNC y solo se lee); cada decodificacion, con el haz de video: VBL
+contados por la interrupcion propia, linea y posicion horizontal, con
+resolucion de un color clock. WinUAE A500, 68000 cycle-exact, KS 1.2,
+512 KB chip + 512 KB slow, disquetera al 100 %.
+
+| | medido |
+|---|---|
+| Carga | 774 048 bytes en 42,1 s = **17,9 KB/s** (2103 VSYNC) |
+| Bloque 1 (slow RAM, `$C04A18`) | 497 318 bytes de paquetes |
+| Bloque 2 (Chip, `$0135E8`) | 276 698 bytes de paquetes |
+| Reproduccion | **1100 VBL para 1100 esperados**: sin deriva |
+| Frames mostrados tarde | 1, por 2 VBL |
+| Decodificacion media | 34,9 ms por delta |
+| Peor decodificacion | **60,3 ms** (frame 541: 96 filas, 1920 columnas, pantalla entera) |
+
+**Carga:** 17,9 KB/s, dentro de lo que estimaba `CLAUDE.md` (15–25 KB/s).
+Con el audio del Hito 5 (88 KB mas) la espera antes del video va a ser de
+~47 s. Hay margen barato: hoy la CPU copia cada byte del rebote al bloque
+(~2,4 s en total) sin que el disco lea mientras tanto; con lecturas
+asincronicas se solaparia. El trackloader propio que `CLAUDE.md` deja como
+opcional es la mejora grande.
+
+**El modelo de costo estaba mal por 1,6x.** El contado a mano predecia en
+promedio el 61 % de lo medido. Ajuste por minimos cuadrados sobre los 253
+deltas:
+
+```
+ciclos = 5580 + 851,6 x filas + 177,5 x columnas     R2 = 1,0000
+```
+
+con residuo maximo de 0,14 ms. El R2 perfecto no es casualidad: el hardware
+emulado cycle-exact es determinista y el costo es de verdad lineal en filas
+y columnas. Lo que la cuenta a mano no veia: recorrer los 20 bits de la
+mascara cuesta ~36 ciclos por columna aunque no este marcada, 720 por fila.
+Si alguna vez hace falta, se puede saltar de a 8 columnas cuando un byte de
+la mascara vale 0. Las constantes nuevas estan en `encoder\stream.h`.
+
+**El limite de 40 ms por frame no es la regla que importa.** Un frame
+completo tarda 60 ms y aun asi hubo un solo frame tarde. El reproductor
+empieza a decodificar un delta cuando el intercambio anterior libera el
+buffer oculto, y tiene hasta el VBL de ese delta: con `--min-hold 2` son
+80 ms, salvo en los cortes de escena, que pueden venir pegados. Los 40 ms de
+`CLAUDE.md` son el peor caso de dos deltas seguidos, no un limite por frame.
+Ver la entrada siguiente.
+
+---
+
+## 2026-09-11 — El encoder simula la linea de tiempo del reproductor
+
+**Decision:** en vez de un tope fijo de 40 ms por frame, el encoder simula
+lo que hace el reproductor. Cada delta empieza a decodificarse cuando el
+intercambio anterior libera el buffer oculto y tiene que estar listo para el
+VBL en que le toca verse; con el modelo calibrado, el encoder sabe cuanto
+tarda. Si un delta llegaria tarde por mas de `--max-late` VBL (2 por
+defecto), se degrada; si no, se lo deja llegar tarde. `--frame-ms` queda
+como tope fijo opcional, apagado por defecto.
+
+**Esto se aparta de `CLAUDE.md`**, que pedia degradar o repartir todo frame
+que pasara de 40 ms. Motivos, los dos medidos:
+
+1. 40 ms no es el limite real, es el caso de dos deltas seguidos. Con
+   `--min-hold 2` cada delta tiene 80 ms, salvo en los cortes de escena.
+2. Degradar es subir el umbral de perdida por pixel, y eso deja salpicado
+   persistente (Hito 2). Un frame que se ve 40 ms tarde, con la sincronia
+   intacta, se nota mucho menos. Con el modelo calibrado y el tope fijo de
+   40 ms se habrian degradado todos los frames de pantalla completa del
+   opening, sin necesidad.
+
+**Validacion:** con el modelo calibrado, la simulacion sobre `final22.a5v`
+predice **1 frame tarde, por 2 VBL** (el 548, un corte de escena pegado a
+otro delta): exactamente lo que midio la Amiga. Con `--max-late 2` no se
+degrada nada y el stream sale identico byte a byte al que se midio. El peor
+delta previsto, 60,5 ms, coincide con el medido, 60,3 ms.
+
+"Repartir un frame en los siguientes", la otra opcion de `CLAUDE.md`, sigue
+sin implementar: con estos numeros no hace falta.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
-- **Velocidad de lectura de trackdisk.** `CLAUDE.md` estima 15–25 KB/s. Sin
-  medir: no se toco todavia el cargador de datos. Importa mucho (a 20 KB/s,
-  cargar 880 KB son ~44 s de espera antes de que empiece el video). Se mide en
-  el Hito 4, cuando exista la carga de verdad.
-- **Costo de decodificacion por frame.** Se mide en el Hito 4 y calibra el
-  modelo de costo del encoder.
+- ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
+- ~~Costo de decodificacion por frame.~~ Medido y calibrado en el Hito 4.
 - ~~WAIT horizontal del Copper para el doblado vertical.~~ Resuelto en el
   Hito 3 con el truco del modulo (ver arriba).

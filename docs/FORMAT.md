@@ -29,7 +29,8 @@ no es un volumen valido y esta bien.
 | 2 … | Reproductor, en sectores consecutivos |
 | siguiente al reproductor … | Datos: bitstream (cabecera + paquetes) |
 | 1719–1758 | Solo en discos de prueba: volcado del framebuffer (Hito 3) |
-| 1759 | Solo en discos de prueba: sector de informacion (`MEMR` o `FBDM`) |
+| 1754–1758 | Solo en discos de medicion: tiempos de decodificacion (Hito 4) |
+| 1759 | Solo en discos de prueba: sector de informacion (`MEMR`, `FBDM` o `PLAY`) |
 
 Los datos empiezan en el primer sector libre despues del reproductor. `mkadf`
 escribe en la cabecera del reproductor donde quedaron. En los discos de
@@ -257,3 +258,44 @@ ocupa los sectores 1719–1748.
 (el framebuffer esperado, mismo formato que el volcado) y `<f>.ppm` (la
 imagen de referencia). `build.ps1 still` compara el volcado contra `<f>.fb`
 byte a byte.
+
+---
+
+## Mediciones del Hito 4 (sectores 1754–1759)
+
+Las graba el reproductor de medicion (`player.s` ensamblado con
+`-DBENCH=1`) al terminar la reproduccion, despues de devolverle la maquina
+al sistema.
+
+**Sectores 1754–1758:** 640 longwords big-endian, una por paquete: los
+color clocks (3 546 895 por segundo; la CPU hace 2 ciclos por cada uno) que
+tardo en decodificarse ese DELTA, medidos con el haz de video (VBL, linea y
+posicion horizontal). Cero para las repeticiones y para los paquetes
+despues del 640.
+
+**Sector 1759:**
+
+| Offset | Tamano | Contenido |
+|---|---|---|
+| 0 | 4 | `"PLAY"` |
+| 4 | 4 | Paquetes del bitstream |
+| 8 | 4 | Duracion de la carga, en VSYNC (TOD del CIA-A) |
+| 12 | 4 | Bytes cargados (cabecera + paquetes) |
+| 16 | 4 | Direccion del bloque 1 (slow RAM) |
+| 20 | 4 | Bytes de paquetes que quedaron en el bloque 1 |
+| 24 | 4 | Direccion del bloque 2 (Chip) |
+| 28 | 4 | Bytes de paquetes que quedaron en el bloque 2 |
+| 32 | 4 | Frames que se mostraron tarde |
+| 36 | 4 | Mayor atraso, en VBL |
+| 40 | 4 | VBL que duro la reproduccion |
+| 44 | 4 | VBL que tendria que haber durado (2 por paquete) |
+| 48 | 8 | Direcciones de los dos framebuffers |
+| 56 | 4 | Peor decodificacion, en color clocks |
+| 60 | 4 | Paquete de la peor decodificacion |
+| 64 | 4 | Deltas medidos |
+| 68 | 4 | Entradas de la tabla de tiempos (640) |
+| 72 | 4 | Error de trackdisk al grabar la tabla (0 = bien) |
+| 76 | 436 | Cero |
+
+`a500vp-dec --in <bitstream> --measure <disco.adf>` los cruza con las
+estadisticas de cada delta y ajusta el modelo de costo.

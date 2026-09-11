@@ -44,6 +44,10 @@ es V36 (Kickstart 2.0) y no se puede usar.
 .\build.ps1 check        # lo arranca, lo cierra y te imprime la medicion
 .\build.ps1 still        # Hito 3: frame fijo en WinUAE, verificado byte a byte
                          # (-Stream work\final22.a5v -Frame 182 por defecto)
+.\build.ps1 play         # Hito 4: disco de medicion. Carga y reproduce el
+                         # stream entero (~2,5 min), captura la ventana cada
+                         # -ShotEvery s en work\shots\ y ajusta el modelo de
+                         # costo con lo que midio la Amiga
 .\build.ps1 clean        # borra work\
 
 .\tools\shot.ps1         # arranca WinUAE y saca una captura a work\shot.png
