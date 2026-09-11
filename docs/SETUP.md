@@ -54,13 +54,15 @@ Rutas pisables: `-Vasm`, `-Gcc`, `-WinUAE`, `-Rom`, `-Timeout`.
 `build.ps1` compila tambien `work\a500vp-enc.exe` y `work\a500vp-dec.exe`.
 
 ```powershell
-# bitstream de los primeros 30 s, ajustado al disquete
-.\work\a500vp-enc.exe --in "C:\ruta\al\opening.mp4" --duration 30 `
-    --planes 3 --sharpen 1.2 --out work\video.a5v
+# bitstream de los primeros 22 s. Los defaults son los parametros elegidos
+# en el Hito 2 (8 colores, realce 1.2, hold 2, histeresis 0.07) y el
+# presupuesto por defecto ya descuenta el audio.
+.\work\a500vp-enc.exe --in "C:\ruta\al\opening.mp4" --duration 22 `
+    --out work\video.a5v
 
 # reconstruirlo, verificarlo contra el encoder y sacar el preview con audio
 .\work\a500vp-dec.exe --in work\video.a5v --preview work\preview.mp4 `
-    --audio "C:\ruta\al\opening.mp4" --audio-duration 30
+    --audio "C:\ruta\al\opening.mp4" --audio-duration 22
 ```
 
 El decoder termina con `VERIFICACION: OK` si reconstruyo todos los frames

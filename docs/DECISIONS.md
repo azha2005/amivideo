@@ -421,6 +421,71 @@ ya ni N = 3 entra sin perdida.
 
 ---
 
+## 2026-09-11 — Decision de Az: 22 s a 12,5 fps, 8 colores, sin perdida
+
+**Lo que no entra:** 30 s a 25 fps, casi sin perdida, son 1,63 MB. El disco
+deja ~763 KB de video una vez descontado el audio. Achicar 2x con perdida
+por pixel produce salpicado inaceptable (ver arriba).
+
+**Opciones que se le presentaron a Az, todas medidas y miradas:**
+
+| | cadencia | perdida | pixeles con error visible |
+|---|---|---|---|
+| 30 s | hasta 8,3 fps | umbral 0,124 | 13,2 %, salpicado visible |
+| 20 s | hasta 12,5 fps | ninguna | 2,3 %, limpio |
+| 24 s | hasta 12,5 fps | umbral 0,109 | 3,8 % |
+
+Mas "invertir en el encoder" (resultado incierto) y "dos disquetes" (fuera
+del alcance de la V1 segun `CLAUDE.md`).
+
+**Decision:** Az eligio **~22 s a 12,5 fps**. Con eso:
+
+- **8 colores, no 16.** Revierte lo que Az eligio en el Hito 1 mirando el
+  preview sin comprimir. Con un solo disquete no hay caso: hasta el caso mas
+  holgado ocuparia ~1 MB con 16 colores contra ~800 KB disponibles.
+- `--min-hold 2`: la imagen cambia como mucho cada 2 huecos. El anime esta
+  animado en dos, asi que se nota solo en los paneos.
+- `--stability 0.07`: ver la entrada siguiente.
+- Primeros 22 s del opening: 528 frames de fuente, 550 huecos, 22,035 s.
+
+**Resultado final del Hito 2:** 774 048 bytes de video contra 795 499 de
+presupuesto (sobran 21 KB), **sin ninguna perdida** (umbral base 0,012), 54 %
+de repeticiones, 11 cambios de paleta, 1407 bytes por frame de media y 6086
+el peor. Peor frame segun el modelo sin calibrar: 39,8 ms. El decoder de
+referencia verifica los 550 frames.
+
+---
+
+## 2026-09-11 — Histeresis 0,07: el punto donde el zoom no se raya
+
+La histeresis del cuantizador (`--stability`) es la que mas bytes ahorra,
+pero en un zoom o un fundido "pega" los colores viejos. Con 0,10 el primer
+plano de los anteojos (12,5 s) sale con manchas blancas pegadas en la cara.
+
+Medido y mirado (20 s, `--min-hold 2`):
+
+| `--stability` | casi sin perdida | zoom de los anteojos |
+|---|---|---|
+| 0 | 908 KB | limpio |
+| 0,05 | 791 KB | limpio |
+| 0,07 | (22 s: 774 KB) | limpio |
+| 0,10 | 634 KB | **manchas pegadas** |
+
+0,07 es lo mas alto que se probo sin el defecto, y es lo que permite los 22 s
+sin perdida. Default del encoder.
+
+---
+
+## 2026-09-11 — El presupuesto por defecto ya descuenta el audio
+
+Olvidar el audio al presupuestar paso una vez. Ahora, si no se pasa
+`--budget`, el encoder calcula el video disponible como el disco menos el
+audio que se va a llevar la duracion real en pantalla, a fib4 (4 bits por
+muestra) y 3546895/`--audio-period` Hz. Para 22 s: 883 712 − 88 213 =
+**795 499 bytes**.
+
+---
+
 ## 2026-09-11 — El control de tasa deja presupuesto sin usar
 
 La busqueda binaria sobre el umbral de calidad supone que mas umbral siempre
