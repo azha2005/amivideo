@@ -4,6 +4,8 @@
 ;----------------------------------------------------------------------
 
 ; --- exec.library LVOs ---
+_LVODisable         equ -120
+_LVOEnable          equ -126
 _LVOForbid          equ -132
 _LVOPermit          equ -138
 _LVOAllocMem        equ -198
@@ -47,6 +49,15 @@ TD_MOTOR            equ 9
 CUSTOM              equ $dff000
 DMACON              equ $096
 DMACONR             equ $002
+VPOSR               equ $004            ; bit 0 = V8
+VHPOSR              equ $006            ; V7..V0 | H8..H1 (en color clocks)
+INTENAR             equ $01c
+INTREQR             equ $01e
+
+; --- CIA-A: el TOD cuenta VSYNC. Solo se lee. ---
+CIAA_TODHI          equ $bfea01         ; leer el alto congela hasta leer el bajo
+CIAA_TODMID         equ $bfe901
+CIAA_TODLO          equ $bfe801
 INTENA              equ $09a
 INTREQ              equ $09c
 COP1LC              equ $080
