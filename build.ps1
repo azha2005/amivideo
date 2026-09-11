@@ -254,52 +254,12 @@ public static class A5Win {
 # dar segun el decoder de referencia. Formato del volcado en FORMAT.md.
 function Test-Still {
     param([string]$Adf, [string]$Still)
-    $DUMP_SECTOR = 1719
-    $INFO_SECTOR = 1759
-    $disk = [System.IO.File]::ReadAllBytes($Adf)
-    $io = $INFO_SECTOR * $SECTOR_SIZE
-    $magic = [System.Text.Encoding]::ASCII.GetString($disk, $io, 4)
-    if ($magic -ne 'FBDM') {
-        Write-Host ""
-        Write-Host "El reproductor no grabo el volcado (magic='$magic')." -ForegroundColor Yellow
-        Write-Host "Mira la captura: el color del borde dice donde se trabo."
-        return $false
-    }
-    $planes   = Get-BE32 $disk ($io + 4)
-    $fbAddr   = Get-BE32 $disk ($io + 8)
-    $copAddr  = Get-BE32 $disk ($io + 12)
-    $consumed = Get-BE32 $disk ($io + 16)
-    $werr     = Get-BE32 $disk ($io + 20)
-
-    $exp = [System.IO.File]::ReadAllBytes("$Still.fb")
-    $off = $DUMP_SECTOR * $SECTOR_SIZE
-    $bad = 0; $first = -1
-    for ($i = 0; $i -lt $exp.Length; $i++) {
-        if ($disk[$off + $i] -ne $exp[$i]) { if ($first -lt 0) { $first = $i }; $bad++ }
-    }
-
-    $s = [System.IO.File]::ReadAllBytes($Still)
-    $ncolors = [int]$s[13]
-    $palBad = 0
-    for ($k = 0; $k -lt 2 * $ncolors; $k++) {
-        if ($s[38 + $k] -ne $disk[$io + 24 + $k]) { $palBad++ }
-    }
-    # longitud del paquete - cabecera - paleta = delta (+1 si hubo relleno)
-    $x = (Get-BE16 $s 32) - 6 - 2 * $ncolors
-    $deltaOk = ($consumed -eq $x) -or ($consumed -eq $x - 1)
-
-    Write-Host ""
-    Write-Host ("reproductor: {0} planos, framebuffer en 0x{1:X8}, copper en 0x{2:X8}" -f $planes, $fbAddr, $copAddr)
-    Write-Host ("delta      : consumio {0} bytes (esperado {1} o {2}) -> {3}" -f $consumed, $x, ($x - 1), $(if ($deltaOk) { 'OK' } else { 'MAL' }))
-    Write-Host ("paleta     : {0} de {1} bytes distintos -> {2}" -f $palBad, (2 * $ncolors), $(if ($palBad -eq 0) { 'OK' } else { 'MAL' }))
-    if ($werr -ne 0) { Write-Host ("volcado    : trackdisk devolvio error {0}" -f $werr) -ForegroundColor Yellow }
-    if ($bad -eq 0) {
-        Write-Host ("framebuffer: {0} bytes, identico al decoder de referencia -> OK" -f $exp.Length) -ForegroundColor Green
-    } else {
-        Write-Host ("framebuffer: {0} de {1} bytes distintos, el primero en el byte {2} (plano {3}, fila {4}, byte {5})" -f `
-            $bad, $exp.Length, $first, [math]::Floor($first / 5120), [math]::Floor(($first % 5120) / 40), ($first % 40)) -ForegroundColor Red
-    }
-    return ($bad -eq 0) -and ($palBad -eq 0) -and $deltaOk -and ($werr -eq 0)
+    # El decoder de referencia compara framebuffer y copper list, byte por
+    # byte, con lo que tendria que haber armado el reproductor.
+    & (Join-Path $work 'a500vp-dec.exe') --in $Still --check-still $Adf |
+        Select-String -Pattern 'volcado|reproductor:|delta  |framebuffer:|copper list:|AVISO|Mira' |
+        ForEach-Object { Write-Host $_.Line }
+    return ($LASTEXITCODE -eq 0)
 }
 
 #---------------------------------------------------------------------------
@@ -331,7 +291,7 @@ switch ($Task) {
             '--boot',   (Join-Path $work 'boot.bin'),
             '--player', (Join-Path $work 'still.bin'),
             '--data',   $still,
-            '--reserve-tail', '41',
+            '--reserve-tail', '80',
             '--out',    $adf)
 
         $r = Start-Emulator -Headless -AdfPath $adf
