@@ -25,10 +25,19 @@ typedef enum { ASPECT_LETTERBOX, ASPECT_CROP, ASPECT_STRETCH } Aspect;
 
 typedef struct {
     int    start, count;       /* primer frame y cantidad */
-    A5Palette pal;
+    A5Palette *pal;            /* una por franja (g_nbands) */
     size_t unique;
     double error;
 } Scene;
+
+/* Franjas de paleta, fijas para todo el video (se deciden en main). */
+static int g_band_rows = 0, g_band_y0 = 0, g_nbands = 1;
+
+/* La paleta con que se ve la fila logica y. */
+static const A5Palette *rowpal(const A5Palette *pals, int y)
+{
+    return pals + a5v_band_of(y, g_band_rows, g_band_y0, g_nbands);
+}
 
 static void die(const char *msg)
 {
@@ -188,39 +197,46 @@ typedef struct {
     double err_sum;         /* error perceptual medio contra el frame ideal */
     long   bad_pixels;      /* pixeles activos con error visible, sumados */
     uint32_t *crc;          /* uno por frame, del buffer visible */
+    double src_err;         /* error de lo que se ve contra la fuente, sumado */
+    long   src_bad;         /* pixeles que se ven a mas de A5_VISIBLE_ERR */
 } A5Stream;
 
 /* Checksum de un frame tal como se ve: los indices mas la paleta con la que
  * se muestran. El decoder de referencia recalcula esto y tiene que dar lo
  * mismo, byte por byte. */
 static uint32_t frame_crc(const uint8_t *vis, size_t fsz,
-                          const A5Palette *pal, int ncolors)
+                          const A5Palette *pals, int ncolors)
 {
-    uint8_t pb[A5_MAX_COLORS * 2];
-    int c;
+    static uint8_t pb[A5_MAX_BANDS * A5_MAX_COLORS * 2];
+    int b, c, k = 0;
 
-    for (c = 0; c < ncolors; c++) {
-        pb[c * 2]     = (uint8_t)(pal->rgb444[c] >> 8);
-        pb[c * 2 + 1] = (uint8_t)pal->rgb444[c];
-    }
-    return a5_crc32(pb, (size_t)ncolors * 2, a5_crc32(vis, fsz, 0));
+    for (b = 0; b < g_nbands; b++)
+        for (c = 0; c < ncolors; c++) {
+            pb[k++] = (uint8_t)(pals[b].rgb444[c] >> 8);
+            pb[k++] = (uint8_t)pals[b].rgb444[c];
+        }
+    return a5_crc32(pb, (size_t)k, a5_crc32(vis, fsz, 0));
 }
 
-/* Error perceptual medio entre dos mapas de indices, solo en el area activa. */
+/* Error perceptual medio entre dos mapas de indices, solo en el area activa.
+ * pa y pb son juegos de paletas por franja. */
 static double idx_error(const uint8_t *a, const uint8_t *b,
                         const A5Palette *pa, const A5Palette *pb,
                         int y0, int y1)
 {
-    size_t n = (size_t)(y1 - y0) * A5_W, i;
-    const uint8_t *pa_ = a + (size_t)y0 * A5_W;
-    const uint8_t *pb_ = b + (size_t)y0 * A5_W;
+    size_t n = (size_t)(y1 - y0) * A5_W;
     double sum = 0;
+    int y, x;
 
     if (!n) return 0;
-    for (i = 0; i < n; i++)
-        if (pa_[i] != pb_[i])
-            sum += sqrt((double)a5_oklab_dist2(pa->lab[pa_[i]],
-                                               pb->lab[pb_[i]]));
+    for (y = y0; y < y1; y++) {
+        const A5Palette *ra = rowpal(pa, y), *rb = rowpal(pb, y);
+        const uint8_t *qa = a + (size_t)y * A5_W, *qb = b + (size_t)y * A5_W;
+        for (x = 0; x < A5_W; x++)
+            if (qa[x] != qb[x])
+                sum += sqrt((double)a5_oklab_dist2(ra->lab[qa[x]],
+                                                   rb->lab[qb[x]]));
+    }
     return sum / n;
 }
 
@@ -229,20 +245,44 @@ static double idx_error(const uint8_t *a, const uint8_t *b,
  * 0,1 en Oklab es un cambio de color que se nota sin buscarlo. */
 #define A5_VISIBLE_ERR  0.1
 
-static long idx_bad(const uint8_t *a, const uint8_t *b, const A5Palette *pal,
+static long idx_bad(const uint8_t *a, const uint8_t *b, const A5Palette *pals,
                     int y0, int y1)
 {
-    size_t n = (size_t)(y1 - y0) * A5_W, i;
-    const uint8_t *pa = a + (size_t)y0 * A5_W;
-    const uint8_t *pb = b + (size_t)y0 * A5_W;
     long bad = 0;
+    int y, x;
 
-    for (i = 0; i < n; i++)
-        if (pa[i] != pb[i] &&
-            a5_oklab_dist2(pal->lab[pa[i]], pal->lab[pb[i]]) >
-                A5_VISIBLE_ERR * A5_VISIBLE_ERR)
-            bad++;
+    for (y = y0; y < y1; y++) {
+        const A5Palette *pal = rowpal(pals, y);
+        const uint8_t *pa = a + (size_t)y * A5_W, *pb = b + (size_t)y * A5_W;
+        for (x = 0; x < A5_W; x++)
+            if (pa[x] != pb[x] &&
+                a5_oklab_dist2(pal->lab[pa[x]], pal->lab[pb[x]]) >
+                    A5_VISIBLE_ERR * A5_VISIBLE_ERR)
+                bad++;
+    }
     return bad;
+}
+
+/* Error contra la fuente de lo que se ve. Es la medida que sirve para
+ * comparar paletas distintas: el error contra el frame cuantizado ideal no,
+ * porque el ideal cambia con la paleta. */
+static void src_account(A5Stream *st, const uint8_t *vis,
+                        const A5Palette *pals, const uint8_t *rgb,
+                        int y0, int y1)
+{
+    int y, x;
+
+    for (y = y0; y < y1; y++) {
+        const A5Palette *pal = rowpal(pals, y);
+        const uint8_t *p = rgb + (size_t)y * A5_W * 3;
+        const uint8_t *v = vis + (size_t)y * A5_W;
+        for (x = 0; x < A5_W; x++, p += 3) {
+            double d = sqrt((double)a5_oklab_dist2(
+                a5_srgb_to_oklab(p[0], p[1], p[2]), pal->lab[v[x]]));
+            st->src_err += d;
+            if (d > A5_VISIBLE_ERR) st->src_bad++;
+        }
+    }
 }
 
 /* Calidad con perdida: se deja sin actualizar todo pixel cuyo error, medido
@@ -250,7 +290,7 @@ static long idx_bad(const uint8_t *a, const uint8_t *b, const A5Palette *pal,
  * lo que queda de una fila es despreciable, se descarta la fila entera para
  * ahorrarse tambien su cabecera. */
 static void apply_quality(uint8_t *target, const uint8_t *hidden,
-                          const A5Palette *pal, int y0, int y1,
+                          const A5Palette *pals, int y0, int y1,
                           double pixel_thr, double row_thr)
 {
     int y, x;
@@ -258,6 +298,7 @@ static void apply_quality(uint8_t *target, const uint8_t *hidden,
     if (pixel_thr <= 0) return;
 
     for (y = y0; y < y1; y++) {
+        const A5Palette *pal = rowpal(pals, y);
         uint8_t *t = target + (size_t)y * A5_W;
         const uint8_t *h = hidden + (size_t)y * A5_W;
         double rowsum = 0;
@@ -312,9 +353,9 @@ static void put_packet(A5Stream *st, int op, const A5Palette *pal, int ncolors,
                        size_t audio_len)
 {
     size_t start = st->buf.len;
-    size_t len = 6 + (pal ? (size_t)ncolors * 2 : 0) + audio_len
+    size_t len = 6 + (pal ? (size_t)g_nbands * ncolors * 2 : 0) + audio_len
                + (video ? video->len : 0);
-    int c;
+    int b, c;
 
     if (len & 1) len++;                 /* los paquetes quedan pares */
 
@@ -323,9 +364,10 @@ static void put_packet(A5Stream *st, int op, const A5Palette *pal, int ncolors,
     a5buf_put8(&st->buf, pal ? A5V_F_PALETTE : 0);
     a5buf_put16(&st->buf, (unsigned)audio_len);
 
-    if (pal)
-        for (c = 0; c < ncolors; c++)
-            a5buf_put16(&st->buf, pal->rgb444[c]);
+    if (pal)                            /* una paleta por franja */
+        for (b = 0; b < g_nbands; b++)
+            for (c = 0; c < ncolors; c++)
+                a5buf_put16(&st->buf, pal[b].rgb444[c]);
     if (audio_len)
         a5buf_write(&st->buf, audio, audio_len);
     if (video && video->len)
@@ -346,7 +388,8 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
                          const Scene *scenes, int nscenes, int planes,
                          int ncolors, int y0, int y1,
                          double pixel_thr, double repeat_boost, long cyc_limit,
-                         int min_hold, int max_late, const A5Audio *au)
+                         int min_hold, int max_late, const A5Audio *au,
+                         const uint8_t *const *src)
 {
     size_t fsz = (size_t)A5_W * A5_H;
     uint8_t *vis = calloc(fsz, 1);
@@ -384,7 +427,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         const uint8_t *ab = audio_slice(au, n, &alen);
 
         while (s + 1 < nscenes && (int)n >= scenes[s + 1].start) s++;
-        pal = &scenes[s].pal;
+        pal = scenes[s].pal;
         newscene = ((int)n == scenes[s].start);
 
         /* Tope de cadencia: la imagen se actualiza como mucho cada min_hold
@@ -396,6 +439,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
             st->err_sum += idx_error(vis, ideal, pal, pal, y0, y1);
             st->bad_pixels += idx_bad(vis, ideal, pal, y0, y1);
             st->crc[n] = frame_crc(vis, fsz, pal, ncolors);
+            if (src) src_account(st, vis, pal, src[n], y0, y1);
             continue;
         }
 
@@ -418,6 +462,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
                 st->err_sum += idx_error(vis, ideal, pal, pal, y0, y1);
                 st->bad_pixels += idx_bad(vis, ideal, pal, y0, y1);
                 st->crc[n] = frame_crc(vis, fsz, pal, ncolors);
+                if (src) src_account(st, vis, pal, src[n], y0, y1);
                 continue;
             }
         }
@@ -474,6 +519,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         st->err_sum += idx_error(vis, ideal, pal, pal, y0, y1);
         st->bad_pixels += idx_bad(vis, ideal, pal, y0, y1);
         st->crc[n] = frame_crc(vis, fsz, pal, ncolors);
+        if (src) src_account(st, vis, pal, src[n], y0, y1);
     }
 
     a5buf_free(&video);
@@ -522,6 +568,14 @@ static void usage(void)
 "                            pal:    frames 1:1, todo 4%% mas rapido y el\n"
 "                                    audio sube de tono, como la TV PAL\n"
 "  --planes N              2, 3 o 4 bitplanes = 4, 8 o 16 colores (3)\n"
+"  --band-rows N           paleta por franjas de N filas logicas, cambiada\n"
+"                          por el Copper; 0 = una sola paleta (16). Con 16\n"
+"                          colores no se puede: una sola\n"
+"  --band-overlap N        filas de las franjas vecinas que entran al\n"
+"                          histograma de cada franja (0)\n"
+"  --band-snap F           un color a menos de F (Oklab) de uno de la franja\n"
+"                          de arriba se vuelve ese mismo: quita costuras en\n"
+"                          zonas lisas (0.04)\n"
 "  --dither MODO           none | bayer2 | bayer4 (none)\n"
 "  --dither-strength F     fuerza del dither ordenado (0.05)\n"
 "  --sharpen F             realce de bordes tras escalar; 0 = nada (1.2)\n"
@@ -557,6 +611,8 @@ int main(int argc, char **argv)
     const char *adf_path = NULL;
     const char *boot_path = "work\\boot.bin", *player_path = "work\\player.bin";
     int    reserve_tail = 0;
+    int    band_rows = 16, band_overlap = 0, band_rows_set = 0;
+    double band_snap = 0.04;           /* Hito 6: medidos y mirados */
     uint8_t *boot = NULL, *player = NULL;
     size_t bootlen = 0, playerlen = 0;
     A5Audio au;
@@ -627,6 +683,12 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--boot") && has)          boot_path = argv[++i];
         else if (!strcmp(a, "--player") && has)        player_path = argv[++i];
         else if (!strcmp(a, "--reserve-tail") && has)  reserve_tail = atoi(argv[++i]);
+        else if (!strcmp(a, "--band-rows") && has) {
+            band_rows = atoi(argv[++i]);
+            band_rows_set = 1;
+        }
+        else if (!strcmp(a, "--band-overlap") && has)  band_overlap = atoi(argv[++i]);
+        else if (!strcmp(a, "--band-snap") && has)     band_snap = atof(argv[++i]);
         else if (!strcmp(a, "--aspect") && has) {
             const char *v = argv[++i];
             if (!strcmp(v, "letterbox"))    aspect = ASPECT_LETTERBOX;
@@ -745,6 +807,20 @@ int main(int argc, char **argv)
                "(%d filas de barra)\n",
                ncolors, cols, rows, A5_W, A5_H, A5_H - rows);
     printf("             filtro ffmpeg: %s\n", vfilter);
+
+    /* --- franjas de paleta ------------------------------------------ */
+    if (band_rows < 0 || band_rows > A5_H) die("--band-rows fuera de rango");
+    if (band_overlap < 0) die("--band-overlap no puede ser negativo");
+    if (planes > 3 && !band_rows_set) band_rows = 0;   /* 16 colores: una */
+    g_nbands = a5v_nbands(band_rows, y0, y1);
+    g_band_rows = g_nbands > 1 ? band_rows : 0;
+    g_band_y0 = y0;
+    if (g_nbands > 1 && planes > 3)
+        die("las franjas necesitan 3 planos o menos: con 16 colores el "
+            "Copper no llega a cambiarlos antes de que empiece la linea");
+    if (g_nbands > 1)
+        printf("paleta     : %d franjas de %d filas logicas (solapamiento "
+               "%d)\n", g_nbands, band_rows, band_overlap);
 
     /* --- decodificar ------------------------------------------------ */
     dec = a5_open_decoder(in, start, duration, vfilter, A5_W, A5_H);
@@ -905,57 +981,110 @@ int main(int argc, char **argv)
     if (!idx) die("sin memoria para los frames cuantizados");
     {
         int s;
-        int reserve_black = (aspect != ASPECT_CROP) && (y1 - y0 < A5_H);
+        /* Con franjas el negro se reserva siempre: el color 0 es tambien el
+         * del borde, y el Copper no lo cambia por franja (FORMAT.md). */
+        int reserve_black = ((aspect != ASPECT_CROP) && (y1 - y0 < A5_H))
+                          || g_nbands > 1;
 
         for (s = 0; s < nscenes; s++) {
-            A5Hist *h = a5_hist_new();
-            int n;
-            for (n = 0; n < scenes[s].count; n++)
-                a5_hist_add_frame(h, frames[scenes[s].start + n], A5_W, y0, y1);
-            a5_quantize(h, ncolors, reserve_black, seed + s, &scenes[s].pal);
-            a5_hist_assign(h, &scenes[s].pal);
-            scenes[s].unique = a5_hist_unique(h);
-            scenes[s].error = a5_hist_mean_error(h, &scenes[s].pal);
+            int n, b;
+            double esum = 0, wsum = 0;
 
-            /* Se cuantiza aca, con el histograma todavia vivo: sin dither
-             * alcanza con la cache de indices que ya tiene cada color.
-             *
-             * Histeresis temporal: si el indice que tenia el pixel en el
-             * frame anterior sigue siendo casi tan bueno como el optimo, se
-             * lo deja. La fuente es un h264 de 2 Mbit/s y tiene ruido de
-             * compresion; sin esto, en una zona quieta los pixeles saltan
-             * entre dos colores vecinos de la paleta y cada salto se paga en
-             * bytes de delta sin que se vea nada. */
-            for (n = 0; n < scenes[s].count; n++) {
-                size_t f = (size_t)scenes[s].start + n;
-                uint8_t *dst = idx + f * A5_W * A5_H;
-                const uint8_t *pv = n ? dst - (size_t)A5_W * A5_H : NULL;
-                int y;
-                memset(dst, 0, (size_t)A5_W * A5_H);
-                for (y = y0; y < y1; y++) {
-                    const uint8_t *p = frames[f] + (size_t)y * A5_W * 3;
-                    int x;
-                    for (x = 0; x < A5_W; x++, p += 3) {
-                        int best = dither == A5_DITHER_NONE
-                            ? a5_hist_lookup(h, p[0], p[1], p[2])
-                            : a5_map_pixel_dither(&scenes[s].pal, p[0], p[1],
-                                                  p[2], x, y, dither, dstrength);
-                        if (pv && stability > 0) {
-                            int old = pv[y * A5_W + x];
-                            if (old != best) {
-                                Oklab c = a5_srgb_to_oklab(p[0], p[1], p[2]);
-                                double dold = sqrt((double)a5_oklab_dist2(
-                                    c, scenes[s].pal.lab[old]));
-                                double dnew = sqrt((double)a5_oklab_dist2(
-                                    c, scenes[s].pal.lab[best]));
-                                if (dold <= dnew + stability) best = old;
-                            }
+            scenes[s].pal = calloc((size_t)g_nbands, sizeof *scenes[s].pal);
+            if (!scenes[s].pal) die("sin memoria");
+            scenes[s].unique = 0;
+            for (n = 0; n < scenes[s].count; n++)
+                memset(idx + ((size_t)scenes[s].start + n) * A5_W * A5_H, 0,
+                       (size_t)A5_W * A5_H);
+
+            /* Una paleta por franja, con el histograma de sus filas en toda
+             * la escena. band_overlap suma al histograma (no al mapeo) filas
+             * de las franjas vecinas, para que dos paletas vecinas se
+             * parezcan cerca del borde entre ellas. Con una sola franja es
+             * exactamente la paleta por escena de antes, semilla incluida. */
+            for (b = 0; b < g_nbands; b++) {
+                A5Palette *bp = &scenes[s].pal[b];
+                int by0 = g_nbands > 1 ? y0 + b * band_rows : y0;
+                int by1 = g_nbands > 1 && by0 + band_rows < y1
+                        ? by0 + band_rows : y1;
+                int hy0 = by0 - band_overlap < y0 ? y0 : by0 - band_overlap;
+                int hy1 = by1 + band_overlap > y1 ? y1 : by1 + band_overlap;
+                A5Hist *h = a5_hist_new();
+
+                for (n = 0; n < scenes[s].count; n++)
+                    a5_hist_add_frame(h, frames[scenes[s].start + n], A5_W,
+                                      hy0, hy1);
+                a5_quantize(h, ncolors, reserve_black,
+                            seed + (uint32_t)s + (uint32_t)b * 100003u, bp);
+
+                /* Costuras: una zona lisa que cruza el borde entre dos
+                 * franjas cae en un tono de un lado y en otro casi igual del
+                 * otro, y se ve una raya horizontal. Un color a menos de
+                 * band_snap de uno de la franja de arriba pasa a ser
+                 * exactamente ese; cada color de arriba se usa una vez. */
+                if (b > 0 && band_snap > 0) {
+                    const A5Palette *up = &scenes[s].pal[b - 1];
+                    int c, u, taken[A5_MAX_COLORS] = { 0 };
+                    for (c = 1; c < bp->n; c++) {
+                        int best = -1;
+                        float bd = (float)(band_snap * band_snap);
+                        for (u = 1; u < up->n; u++) {
+                            float d = a5_oklab_dist2(bp->lab[c], up->lab[u]);
+                            if (!taken[u] && d < bd) { bd = d; best = u; }
                         }
-                        dst[y * A5_W + x] = (uint8_t)best;
+                        if (best >= 0) {
+                            taken[best] = 1;
+                            bp->rgb444[c] = up->rgb444[best];
+                            bp->lab[c] = up->lab[best];
+                        }
                     }
                 }
+                a5_hist_assign(h, bp);
+                scenes[s].unique += a5_hist_unique(h);
+                esum += a5_hist_mean_error(h, bp) * (by1 - by0);
+                wsum += by1 - by0;
+
+                /* Se cuantiza aca, con el histograma todavia vivo: sin dither
+                 * alcanza con la cache de indices que ya tiene cada color.
+                 *
+                 * Histeresis temporal: si el indice que tenia el pixel en el
+                 * frame anterior sigue siendo casi tan bueno como el optimo,
+                 * se lo deja. La fuente es un h264 de 2 Mbit/s y tiene ruido
+                 * de compresion; sin esto, en una zona quieta los pixeles
+                 * saltan entre dos colores vecinos de la paleta y cada salto
+                 * se paga en bytes de delta sin que se vea nada. */
+                for (n = 0; n < scenes[s].count; n++) {
+                    size_t f = (size_t)scenes[s].start + n;
+                    uint8_t *dst = idx + f * A5_W * A5_H;
+                    const uint8_t *pv = n ? dst - (size_t)A5_W * A5_H : NULL;
+                    int y;
+                    for (y = by0; y < by1; y++) {
+                        const uint8_t *p = frames[f] + (size_t)y * A5_W * 3;
+                        int x;
+                        for (x = 0; x < A5_W; x++, p += 3) {
+                            int best = dither == A5_DITHER_NONE
+                                ? a5_hist_lookup(h, p[0], p[1], p[2])
+                                : a5_map_pixel_dither(bp, p[0], p[1], p[2],
+                                                      x, y, dither, dstrength);
+                            if (pv && stability > 0) {
+                                int old = pv[y * A5_W + x];
+                                if (old != best) {
+                                    Oklab c = a5_srgb_to_oklab(p[0], p[1],
+                                                               p[2]);
+                                    double dold = sqrt((double)a5_oklab_dist2(
+                                        c, bp->lab[old]));
+                                    double dnew = sqrt((double)a5_oklab_dist2(
+                                        c, bp->lab[best]));
+                                    if (dold <= dnew + stability) best = old;
+                                }
+                            }
+                            dst[y * A5_W + x] = (uint8_t)best;
+                        }
+                    }
+                }
+                a5_hist_free(h);
             }
-            a5_hist_free(h);
+            scenes[s].error = wsum > 0 ? esum / wsum : 0;
         }
     }
 
@@ -980,13 +1109,14 @@ int main(int argc, char **argv)
             const uint8_t *f = idx + n * (size_t)A5_W * A5_H;
             int y;
             while (s + 1 < nscenes && (int)n >= scenes[s + 1].start) s++;
-            pal = &scenes[s].pal;
+            pal = scenes[s].pal;
 
             for (y = 0; y < A5_H; y++) {
                 int x;
                 for (x = 0; x < A5_W; x++) {
                     uint8_t r, g, b;
-                    a5_rgb444_to_srgb(pal->rgb444[f[y * A5_W + x]], &r, &g, &b);
+                    a5_rgb444_to_srgb(rowpal(pal, y)->rgb444[f[y * A5_W + x]],
+                                      &r, &g, &b);
                     row[x * 6 + 0] = r; row[x * 6 + 1] = g; row[x * 6 + 2] = b;
                     row[x * 6 + 3] = r; row[x * 6 + 4] = g; row[x * 6 + 5] = b;
                 }
@@ -1013,8 +1143,9 @@ int main(int argc, char **argv)
                    scenes[s].start, scenes[s].count,
                    scenes[s].count / A5_VIDEO_FPS,
                    (unsigned long)scenes[s].unique, scenes[s].error);
-            for (c = 0; c < scenes[s].pal.n; c++)
-                printf("%03X ", scenes[s].pal.rgb444[c]);
+            for (c = 0; c < scenes[s].pal[0].n; c++)
+                printf("%03X ", scenes[s].pal[0].rgb444[c]);
+            if (g_nbands > 1) printf("(franja 0 de %d)", g_nbands);
             printf("\n");
             werr += scenes[s].error * scenes[s].count;
         }
@@ -1034,13 +1165,13 @@ int main(int argc, char **argv)
      * binaria sobre el umbral, que es monotono: mas umbral, menos bytes. */
     {
         A5Stream st;
-        double lo = quality * 0.0015, hi = lo;
+        double lo = quality * 0.0015, hi = lo, qthr = lo;
         size_t total;
         int pass = 0;
 
         build_stream(&st, idx, nframes, scenes, nscenes, planes, ncolors,
                      y0, y1, lo, repeat_boost, cyc_limit, min_hold, max_late,
-                     &au);
+                     &au, NULL);
         total = A5V_HEADER_SIZE + st.buf.len;
         printf("\nbitstream  : calidad %.4f -> %lu bytes\n", lo,
                (unsigned long)total);
@@ -1052,7 +1183,7 @@ int main(int argc, char **argv)
                 a5buf_free(&st.buf); free(st.crc);
                 build_stream(&st, idx, nframes, scenes, nscenes, planes,
                              ncolors, y0, y1, hi, repeat_boost, cyc_limit,
-                             min_hold, max_late, &au);
+                             min_hold, max_late, &au, NULL);
                 total = A5V_HEADER_SIZE + st.buf.len;
                 printf("             calidad %.4f -> %lu bytes\n", hi,
                        (unsigned long)total);
@@ -1063,7 +1194,7 @@ int main(int argc, char **argv)
                 A5Stream t2;
                 build_stream(&t2, idx, nframes, scenes, nscenes, planes,
                              ncolors, y0, y1, mid, repeat_boost, cyc_limit,
-                             min_hold, max_late, &au);
+                             min_hold, max_late, &au, NULL);
                 if (A5V_HEADER_SIZE + t2.buf.len <= (size_t)budget) {
                     a5buf_free(&st.buf); free(st.crc);
                     st = t2; hi = mid; total = A5V_HEADER_SIZE + st.buf.len;
@@ -1074,6 +1205,56 @@ int main(int argc, char **argv)
             }
             printf("             ajustado a %.4f -> %lu bytes\n", hi,
                    (unsigned long)total);
+            qthr = hi;
+        } else if (budget > 0 && lo > 0) {
+            /* Entra y sobra disco: se baja la perdida para usarlo. Entre 0
+             * (a) y la calidad pedida (b, que entra). Mas umbral no da
+             * siempre menos bytes (una repeticion de mas cambia el buffer
+             * oculto de todo lo que sigue), pero la busqueda solo se queda
+             * con streams que entran. */
+            A5Stream t2;
+            double a = 0, b = lo;
+            size_t t;
+
+            build_stream(&t2, idx, nframes, scenes, nscenes, planes, ncolors,
+                         y0, y1, 0.0, repeat_boost, cyc_limit, min_hold,
+                         max_late, &au, NULL);
+            t = A5V_HEADER_SIZE + t2.buf.len;
+            if (t <= (size_t)budget) {
+                a5buf_free(&st.buf); free(st.crc);
+                st = t2; b = 0; total = t;
+            } else {
+                a5buf_free(&t2.buf); free(t2.crc);
+                for (pass = 0; pass < 8 && b - a > 0.0005; pass++) {
+                    double mid = (a + b) / 2;
+                    build_stream(&t2, idx, nframes, scenes, nscenes, planes,
+                                 ncolors, y0, y1, mid, repeat_boost,
+                                 cyc_limit, min_hold, max_late, &au, NULL);
+                    t = A5V_HEADER_SIZE + t2.buf.len;
+                    if (t <= (size_t)budget) {
+                        a5buf_free(&st.buf); free(st.crc);
+                        st = t2; b = mid; total = t;
+                    } else {
+                        a5buf_free(&t2.buf); free(t2.crc);
+                        a = mid;
+                    }
+                }
+            }
+            if (b < lo)
+                printf("             sobraba disco: bajado a %.4f -> %lu "
+                       "bytes\n", b, (unsigned long)total);
+            qthr = b;
+        }
+
+        /* Calidad contra la fuente del stream elegido: se lo arma una vez
+         * mas (sale identico) midiendo lo que se ve contra el original. */
+        {
+            A5Stream t3;
+            build_stream(&t3, idx, nframes, scenes, nscenes, planes, ncolors,
+                         y0, y1, qthr, repeat_boost, cyc_limit, min_hold,
+                         max_late, &au, (const uint8_t *const *)frames);
+            a5buf_free(&st.buf); free(st.crc);
+            st = t3;
         }
 
         /* --- escribir --------------------------------------------- */
@@ -1085,7 +1266,8 @@ int main(int argc, char **argv)
             if (!f) die("no pude abrir el archivo de salida");
             a5buf_init(&hdr);
             a5v_put_header(&hdr, planes, ncolors, au.format, au.period,
-                           y0, y1, (uint32_t)nframes, (uint32_t)st.buf.len);
+                           y0, y1, g_band_rows, (uint32_t)nframes,
+                           (uint32_t)st.buf.len);
             fwrite(hdr.p, 1, hdr.len, f);
             fwrite(st.buf.p, 1, st.buf.len, f);
             fclose(f);
@@ -1176,6 +1358,11 @@ int main(int argc, char **argv)
                "visible (> %.2f)\n",
                100.0 * st.bad_pixels / ((double)nframes * (y1 - y0) * A5_W),
                A5_VISIBLE_ERR);
+        printf("vs. fuente : error %.4f; %.2f%% de los pixeles activos a mas "
+               "de %.2f del original\n",
+               st.src_err / ((double)nframes * (y1 - y0) * A5_W),
+               100.0 * st.src_bad / ((double)nframes * (y1 - y0) * A5_W),
+               A5_VISIBLE_ERR);
         if (budget > 0)
             printf("presupuesto: %ld bytes, %s por %ld\n", budget,
                    total <= (size_t)budget ? "entra" : "NO ENTRA",
@@ -1189,6 +1376,7 @@ int main(int argc, char **argv)
 
     for (i = 0; (size_t)i < nsrc; i++) free(srcframes[i]);
     free(srcframes); free(frames); free(idx);
+    for (i = 0; i < nscenes; i++) free(scenes[i].pal);
     free(prev); free(cur); free(delta); free(scenes);
     free(au.bytes); free(au.recon); free(boot); free(player);
     return 0;
