@@ -8,8 +8,14 @@
 #include "a500vp.h"
 
 #define A5V_MAGIC        "A5VP"
-#define A5V_VERSION      2
+#define A5V_VERSION      3
 #define A5V_HEADER_SIZE  32
+
+/* Formato del audio (byte 28 de la cabecera, desde la version 3). */
+#define A5V_AUDIO_NONE   0
+#define A5V_AUDIO_FIB4   1       /* Fibonacci-delta de 4 bits, 8SVX */
+#define A5V_AUDIO_PCM8   2       /* PCM de 8 bits con signo */
+#define A5V_HDR_AUDIOFMT 28
 
 #define A5_MAX_PLANES    4
 #define A5_ROWBYTES      (A5_W / 8)          /* 20 bytes logicos por fila */
@@ -48,6 +54,23 @@
 #define A5_CYC_BYTE          52
 #define A5_FRAME_BUDGET_CYC  ((long)(A5_CPU_HZ * 0.040))
 #define A5_CYC_PER_VBL       (A5_CPU_HZ / A5_VBL_HZ)   /* ~142103 */
+
+/* --- costo del audio en la CPU -------------------------------------------
+ * El reproductor llena un buffer de Paula de A5_AUD_BUF_SAMPLES muestras
+ * en cada interrupcion de nivel 4, que llega cada 512 x periodo color
+ * clocks desde el VBL del frame 0. Ese tiempo se lo roba al delta que se
+ * este decodificando. Ciclos de CPU por llenado, segun el formato, medidos
+ * con el disco de medicion (Hito 5, 2026-09-11):
+ *
+ *   fib4: 32015 de media dentro de la rutina (345 llenados, el peor
+ *         32830), mas ~300 de entrar y salir de la interrupcion, contados
+ *         a mano. Es el 7,1 % de la CPU a 8006,5 Hz.
+ *   pcm8: 27918 de media (el peor 28690), mas los mismos ~300: 6,2 %. */
+#define A5_AUD_BUF_SAMPLES   512
+#define A5_CYC_AUDIO_FILL    32300
+#define A5_CYC_AUDIO_FILL_PCM8 28200
+
+long a5_audio_fill_cost(int format);
 
 /* --- buffer de bytes que crece ----------------------------------------- */
 typedef struct { uint8_t *p; size_t len, cap; } A5Buf;
@@ -91,8 +114,34 @@ long a5_delta_cost(const A5DeltaStats *st);
 /* --- cabecera y doblado ------------------------------------------------- */
 
 /* Escribe la cabecera de 32 bytes del bitstream (docs/FORMAT.md). */
-void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_period,
-                    int y0, int y1, uint32_t npackets, uint32_t payload);
+void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_format,
+                    int audio_period, int y0, int y1, uint32_t npackets,
+                    uint32_t payload);
+
+/* --- audio ---------------------------------------------------------------
+ * El audio de todos los paquetes, puesto uno detras del otro, es un solo
+ * flujo continuo. Cada paquete lleva una cantidad par de muestras.
+ *
+ * fib4: dos muestras por byte, nibble alto primero. Cada nibble indexa
+ * a5_fib_table y se suma a un acumulador de 8 bits que arranca en 0 al
+ * principio del flujo y sigue de un paquete al otro. El encoder elige los
+ * nibbles para que el acumulador nunca de la vuelta.
+ * pcm8: una muestra por byte, con signo. */
+extern const int8_t a5_fib_table[16];
+
+/* Codifica n muestras (n par, en escala de 8 bits con signo) a n/2 bytes.
+ * recon recibe lo que va a sonar (puede ser NULL). acc es el acumulador,
+ * que se conserva entre llamadas. */
+void a5_fib4_encode(const float *in, size_t n, uint8_t *out, int8_t *recon,
+                    int *acc);
+void a5_fib4_decode(const uint8_t *in, size_t nbytes, int *acc, int8_t *out);
+
+/* Muestras que suenan mientras se ven los frames 0..n inclusive: la
+ * acumulacion fraccional con las frecuencias exactas, redondeada a par. */
+uint32_t a5_audio_samples_through(uint32_t n, double paula_hz);
+
+/* Bytes de audio de una cantidad de muestras, segun el formato. */
+size_t a5_audio_bytes(int format, size_t samples);
 
 /* Doblado horizontal: cada bit del byte logico se repite dos veces, el bit 7
  * termina en los bits 15-14. Es la misma tabla que arma el reproductor. */

@@ -1,6 +1,7 @@
 /* stream.c - ver stream.h y docs/FORMAT.md */
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "stream.h"
 
 /* --- buffer que crece --------------------------------------------------- */
@@ -190,22 +191,101 @@ const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
 
 /* --- cabecera y doblado --------------------------------------------------- */
 
-void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_period,
-                    int y0, int y1, uint32_t npackets, uint32_t payload)
+void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_format,
+                    int audio_period, int y0, int y1, uint32_t npackets,
+                    uint32_t payload)
 {
+    int has_audio = audio_format != A5V_AUDIO_NONE;
+
     a5buf_write(b, A5V_MAGIC, 4);
     a5buf_put16(b, A5V_VERSION);
-    a5buf_put16(b, audio_period ? 1u : 0u);    /* flags: bit 0 = hay audio */
+    a5buf_put16(b, has_audio ? 1u : 0u);       /* flags: bit 0 = hay audio */
     a5buf_put16(b, A5_W);
     a5buf_put16(b, A5_H);
     a5buf_put8(b, (unsigned)planes);
     a5buf_put8(b, (unsigned)ncolors);
-    a5buf_put16(b, (unsigned)audio_period);
+    a5buf_put16(b, has_audio ? (unsigned)audio_period : 0u);
     a5buf_put16(b, (unsigned)y0);
     a5buf_put16(b, (unsigned)y1);
     a5buf_put32(b, npackets);
     a5buf_put32(b, payload);
-    a5buf_put32(b, 0);                         /* reservado */
+    a5buf_put8(b, (unsigned)audio_format);     /* 28: formato del audio */
+    a5buf_put8(b, 0);                          /* reservado */
+    a5buf_put16(b, 0);
+}
+
+/* --- audio ---------------------------------------------------------------- */
+
+const int8_t a5_fib_table[16] = {
+    -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21
+};
+
+void a5_fib4_encode(const float *in, size_t n, uint8_t *out, int8_t *recon,
+                    int *accp)
+{
+    int acc = *accp;
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        int best = 8, k;
+        float bd = 1e30f;
+
+        /* Codicioso: el nibble que deja al acumulador mas cerca de la
+         * muestra, sin salirse de 8 bits (el 68000 suma con add.b y daria
+         * la vuelta). */
+        for (k = 0; k < 16; k++) {
+            int v = acc + a5_fib_table[k];
+            float d;
+            if (v < -128 || v > 127) continue;
+            d = in[i] - (float)v;
+            if (d < 0) d = -d;
+            if (d < bd) { bd = d; best = k; }
+        }
+        acc += a5_fib_table[best];
+        if (recon) recon[i] = (int8_t)acc;
+        if (i & 1) out[i / 2] |= (uint8_t)best;
+        else       out[i / 2] = (uint8_t)(best << 4);
+    }
+    *accp = acc;
+}
+
+void a5_fib4_decode(const uint8_t *in, size_t nbytes, int *accp, int8_t *out)
+{
+    /* Suma en 8 bits con vuelta, como add.b. */
+    uint8_t acc = (uint8_t)*accp;
+    size_t i;
+
+    for (i = 0; i < nbytes; i++) {
+        acc = (uint8_t)(acc + (uint8_t)a5_fib_table[in[i] >> 4]);
+        *out++ = (int8_t)acc;
+        acc = (uint8_t)(acc + (uint8_t)a5_fib_table[in[i] & 15]);
+        *out++ = (int8_t)acc;
+    }
+    *accp = (int8_t)acc;
+}
+
+uint32_t a5_audio_samples_through(uint32_t n, double paula_hz)
+{
+    double sps = paula_hz / A5_VIDEO_FPS;      /* muestras por hueco */
+    return 2u * (uint32_t)floor((n + 1) * sps / 2.0);
+}
+
+long a5_audio_fill_cost(int format)
+{
+    switch (format) {
+    case A5V_AUDIO_FIB4: return A5_CYC_AUDIO_FILL;
+    case A5V_AUDIO_PCM8: return A5_CYC_AUDIO_FILL_PCM8;
+    default:             return 0;
+    }
+}
+
+size_t a5_audio_bytes(int format, size_t samples)
+{
+    switch (format) {
+    case A5V_AUDIO_FIB4: return samples / 2;
+    case A5V_AUDIO_PCM8: return samples;
+    default:             return 0;
+    }
 }
 
 uint16_t a5_double_byte(uint8_t v)

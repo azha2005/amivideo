@@ -103,6 +103,11 @@ int      a5_probe(const char *path, A5SourceInfo *out);
 FILE    *a5_open_decoder(const char *path, double start, double duration,
                          const char *vfilter, int w, int h);
 
+/* Abre ffmpeg y devuelve un FILE* del que sale el audio de la fuente en mono,
+ * s16le a rate Hz. afilter (puede ser NULL) va antes del remuestreo. */
+FILE    *a5_open_audio(const char *path, double start, double duration,
+                       const char *afilter, int rate);
+
 /* Abre ffmpeg escribiendo un mp4; se le mandan frames rgb24 de w*h. */
 FILE    *a5_open_preview(const char *out, int w, int h, double fps,
                          int scale, const char *audio_src,

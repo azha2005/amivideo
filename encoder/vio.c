@@ -125,6 +125,23 @@ FILE *a5_open_decoder(const char *path, double start, double duration,
     return f;
 }
 
+FILE *a5_open_audio(const char *path, double start, double duration,
+                    const char *afilter, int rate)
+{
+    char cmd[8192];
+    char sspart[64] = "", tpart[64] = "", afpart[1024] = "";
+
+    if (start > 0)    snprintf(sspart, sizeof sspart, "-ss %.6f ", start);
+    if (duration > 0) snprintf(tpart, sizeof tpart, "-t %.6f ", duration);
+    if (afilter && *afilter)
+        snprintf(afpart, sizeof afpart, "-af \"%s\" ", afilter);
+
+    snprintf(cmd, sizeof cmd,
+             "ffmpeg -v error -nostdin %s-i \"%s\" %s-vn -ac 1 %s"
+             "-f s16le -ar %d -", sspart, path, tpart, afpart, rate);
+    return open_pipe(cmd, "rb");
+}
+
 FILE *a5_open_preview(const char *out, int w, int h, double fps, int scale,
                       const char *audio_src, double audio_start,
                       double audio_dur, double audio_ratio, int audio_rate)
@@ -143,9 +160,9 @@ FILE *a5_open_preview(const char *out, int w, int h, double fps, int scale,
          * frecuencia original. Mono, que es lo que va a sonar en la Amiga. */
         snprintf(filt, sizeof filt,
                  "-filter_complex \"[0:v]scale=%d:%d:flags=neighbor[v];"
-                 "[1:a]asetrate=%d*%.9f,aresample=%d,"
+                 "[1:a]asetrate=%d*%.9f,aresample=44100,"
                  "aformat=channel_layouts=mono[a]\" ",
-                 w * scale, h * scale, audio_rate, audio_ratio, audio_rate);
+                 w * scale, h * scale, audio_rate, audio_ratio);
         snprintf(amap, sizeof amap,
                  "-map \"[v]\" -map \"[a]\" -c:a aac -b:a 128k ");
     } else {

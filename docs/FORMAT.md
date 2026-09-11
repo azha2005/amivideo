@@ -1,8 +1,11 @@
 # Formato del disco de A500VP
 
-**Version de formato: 2.** Define el disco, el arranque y el bitstream de
-video. El audio tiene su lugar reservado en cada paquete pero todavia viaja
-vacio (Hito 5).
+**Version de formato: 3.** Define el disco, el arranque y el bitstream de
+video y audio.
+
+La version 2 no definia el contenido del audio de los paquetes (viajaba
+vacio). La 3 lo define y usa el byte 28 de la cabecera, antes reservado,
+para el formato del audio.
 
 Todo es **big-endian**. El 68000 lee el disco con punteros pelados, sin
 conversiones.
@@ -106,8 +109,8 @@ pasa el bootblock.
 | Offset | Tamano | Contenido |
 |---|---|---|
 | 0 | 4 | `"A5VP"` |
-| 4 | 2 | Version = 2 |
-| 6 | 2 | Flags. Bit 0 = hay audio (en v2 siempre 0) |
+| 4 | 2 | Version = 3 |
+| 6 | 2 | Flags. Bit 0 = hay audio |
 | 8 | 2 | Ancho logico = 160 |
 | 10 | 2 | Alto logico = 128 |
 | 12 | 1 | Bitplanes (1..4) |
@@ -117,7 +120,8 @@ pasa el bootblock.
 | 18 | 2 | Ultima fila activa + 1 (`y1`) |
 | 20 | 4 | Cantidad de paquetes = cantidad de frames |
 | 24 | 4 | Bytes de paquetes que siguen a la cabecera |
-| 28 | 4 | Reservado, 0 |
+| 28 | 1 | Formato del audio: 0 = ninguno, 1 = fib4, 2 = pcm8 |
+| 29 | 3 | Reservado, 0 |
 
 Las filas fuera de `y0..y1-1` son las barras del letterbox: nunca cambian y
 quedan en el color 0.
@@ -197,6 +201,35 @@ cambiaron.
   penultimo frame **distinto** mostrado (las repeticiones no intercambian).
 - Cada fila logica se ve dos veces (doblado vertical por Copper; Hito 3).
 
+### Audio
+
+Mono. El reproductor lo toca igual por los canales 0 (izquierdo) y 1
+(derecho) de Paula, con el periodo de la cabecera: la frecuencia es
+**3 546 895 / periodo** Hz exactos (443 = 8006,535 Hz).
+
+**El audio de todos los paquetes, puesto uno detras del otro, es un solo
+flujo continuo.** El paquete `n` lleva las muestras que suenan mientras se
+ve el frame `n`:
+
+```
+S(n) = 2 * floor((n + 1) * (Hz de Paula / 24,960205) / 2)
+muestras del paquete n = S(n) - S(n-1),  S(-1) = 0
+```
+
+O sea, acumulacion fraccional con las frecuencias exactas, redondeada a
+una cantidad **par** de muestras por paquete. El error acumulado es siempre
+menor que 2 muestras (0,25 ms), dure lo que dure el video. Esta regla es
+informativa: el reproductor no la necesita, solo consume el flujo.
+
+- **fib4** (formato 1): Fibonacci-delta de 4 bits, el de 8SVX. Dos
+  muestras por byte, **nibble alto primero**. Cada nibble indexa la tabla
+  `-34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21` y el valor
+  se suma a un acumulador de 8 bits con signo; la muestra es el acumulador.
+  El acumulador arranca en 0 al principio del flujo y **sigue de un paquete
+  al otro**. La suma es en 8 bits con vuelta (como `add.b`), pero el
+  encoder elige los nibbles para que nunca de la vuelta.
+- **pcm8** (formato 2): una muestra por byte, con signo.
+
 ### Verificacion
 
 El encoder escribe junto al bitstream un archivo `<salida>.crc`: un CRC-32
@@ -204,6 +237,9 @@ big-endian por frame, calculado sobre el mapa de indices visible
 (160 x 128 bytes, un indice de paleta por pixel logico) seguido de la paleta
 visible serializada en big-endian. El decoder de referencia recalcula lo
 mismo a partir del bitstream y tiene que coincidir en **todos** los frames.
+
+Si hay audio, despues del ultimo CRC de frame va uno mas: el CRC-32 de
+todas las muestras que tienen que sonar (8 bits con signo, en orden).
 
 ---
 
@@ -295,7 +331,20 @@ despues del 640.
 | 64 | 4 | Deltas medidos |
 | 68 | 4 | Entradas de la tabla de tiempos (640) |
 | 72 | 4 | Error de trackdisk al grabar la tabla (0 = bien) |
-| 76 | 436 | Cero |
+| 76 | 4 | Interrupciones de audio (buffers que pidio Paula) |
+| 80 | 8 | Estampa de la primera: VBL (4), linea (2), color clock (2) |
+| 88 | 8 | Estampa de la ultima |
+| 96 | 4 | VBL en que se ve el frame 0, en el mismo contador |
+| 100 | 4 | Formato del audio (0 = sin audio) |
+| 104 | 4 | Periodo de Paula |
+| 108 | 4 | Color clocks llenando buffers de audio, sumados |
+| 112 | 4 | El llenado mas largo, en color clocks |
+| 116 | 396 | Cero |
+
+Las estampas cuentan VBL con la interrupcion propia del reproductor; el
+tiempo en color clocks es `VBL x 313 x 227 + linea x 227 + color clock`.
+Los llenados se miden de la entrada a la salida de la rutina, sin la
+entrada y salida de la interrupcion (unos 300 ciclos de CPU).
 
 `a500vp-dec --in <bitstream> --measure <disco.adf>` los cruza con las
 estadisticas de cada delta y ajusta el modelo de costo.
