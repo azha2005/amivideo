@@ -43,4 +43,29 @@ int adf_put(uint8_t *disk, uint32_t sector, const uint8_t *data, size_t len);
 /* Sectores necesarios para len bytes. */
 uint32_t adf_sectors_for(size_t len);
 
+/* Cabecera del reproductor (player/player.s): "A5PL" y donde estan los datos */
+#define PL_OFF_MAGIC     4
+#define PL_OFF_DATAOFF   8
+#define PL_OFF_DATALEN   12
+#define PL_HEADER_SIZE   16
+#define ADF_PLAYER_SECTOR ADF_BOOT_SECTORS    /* el reproductor arranca en el 2 */
+
+typedef struct {
+    uint32_t player_sectors;
+    uint32_t data_sector;      /* 0 si no hay datos */
+    uint32_t used;             /* primer sector libre */
+    uint32_t limit;            /* sectores disponibles (sin la cola reservada) */
+} AdfLayout;
+
+/* Arma la imagen completa en disk (ADF_SIZE bytes): bootblock con su
+ * checksum y la longitud del reproductor, el reproductor desde el sector 2
+ * y, si hay datos, los datos en el primer sector libre despues del
+ * reproductor, anotando en la cabecera "A5PL" del reproductor (que se
+ * modifica) donde quedaron. reserve deja libres los ultimos sectores.
+ * Devuelve NULL si salio bien, o el motivo del error. */
+const char *adf_assemble(uint8_t *disk, const uint8_t *boot, size_t bootlen,
+                         uint8_t *player, size_t playerlen,
+                         const uint8_t *data, size_t datalen, int reserve,
+                         AdfLayout *lay);
+
 #endif /* A500VP_ADF_H */

@@ -60,3 +60,53 @@ int adf_put(uint8_t *disk, uint32_t sector, const uint8_t *data, size_t len)
     memcpy(disk + off, data, len);
     return 0;
 }
+
+const char *adf_assemble(uint8_t *disk, const uint8_t *boot, size_t bootlen,
+                         uint8_t *player, size_t playerlen,
+                         const uint8_t *data, size_t datalen, int reserve,
+                         AdfLayout *lay)
+{
+    size_t playerpadded;
+
+    if (bootlen > ADF_BOOT_SIZE)
+        return "el bootblock no entra en 1024 bytes";
+    if (bootlen < BB_OFF_CODE || memcmp(boot, "DOS", 3) != 0 || boot[3] != 0)
+        return "el bootblock no empieza con \"DOS\\0\"";
+    if (playerlen == 0)
+        return "el reproductor esta vacio";
+    if (reserve < 0 || reserve >= ADF_SECTORS)
+        return "cola reservada invalida";
+
+    memset(lay, 0, sizeof *lay);
+    lay->limit = ADF_SECTORS - (uint32_t)reserve;
+    lay->player_sectors = adf_sectors_for(playerlen);
+    lay->used = ADF_PLAYER_SECTOR + lay->player_sectors;
+
+    /* El bootblock lee sectores enteros, asi que la longitud va redondeada. */
+    playerpadded = (size_t)lay->player_sectors * ADF_SECTOR_SIZE;
+
+    if (data) {
+        if (playerlen < PL_HEADER_SIZE ||
+            memcmp(player + PL_OFF_MAGIC, "A5PL", 4) != 0)
+            return "el reproductor no tiene la cabecera \"A5PL\": no sabe "
+                   "donde buscar los datos";
+        lay->data_sector = lay->used;
+        be_put_u32(player + PL_OFF_DATAOFF, lay->data_sector * ADF_SECTOR_SIZE);
+        be_put_u32(player + PL_OFF_DATALEN, (uint32_t)datalen);
+        lay->used = lay->data_sector + adf_sectors_for(datalen);
+    }
+    if (lay->used > lay->limit)
+        return "no entra en el disquete";
+
+    memset(disk, 0, ADF_SIZE);
+    memcpy(disk, boot, bootlen);
+    be_put_u32(disk + BB_OFF_STAGE2LEN, (uint32_t)playerpadded);
+    adf_boot_finalize(disk);
+    if (!adf_boot_valid(disk))
+        return "checksum de bootblock invalido (error interno)";
+
+    if (adf_put(disk, ADF_PLAYER_SECTOR, player, playerlen) != 0 ||
+        (data && adf_put(disk, lay->data_sector, data, datalen) != 0))
+        return "no entra en el disquete";
+    return NULL;
+}
