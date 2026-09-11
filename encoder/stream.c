@@ -191,9 +191,23 @@ const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
 
 /* --- cabecera y doblado --------------------------------------------------- */
 
+int a5v_nbands(int band_rows, int y0, int y1)
+{
+    if (band_rows <= 0 || y1 <= y0) return 1;
+    return (y1 - y0 + band_rows - 1) / band_rows;
+}
+
+int a5v_band_of(int y, int band_rows, int y0, int nbands)
+{
+    int b;
+    if (nbands <= 1 || y < y0) return 0;
+    b = (y - y0) / band_rows;
+    return b < nbands ? b : nbands - 1;
+}
+
 void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_format,
-                    int audio_period, int y0, int y1, uint32_t npackets,
-                    uint32_t payload)
+                    int audio_period, int y0, int y1, int band_rows,
+                    uint32_t npackets, uint32_t payload)
 {
     int has_audio = audio_format != A5V_AUDIO_NONE;
 
@@ -210,7 +224,7 @@ void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_format,
     a5buf_put32(b, npackets);
     a5buf_put32(b, payload);
     a5buf_put8(b, (unsigned)audio_format);     /* 28: formato del audio */
-    a5buf_put8(b, 0);                          /* reservado */
+    a5buf_put8(b, (unsigned)band_rows);        /* 29: filas por franja */
     a5buf_put16(b, 0);
 }
 

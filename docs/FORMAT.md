@@ -1,11 +1,12 @@
 # Formato del disco de A500VP
 
-**Version de formato: 3.** Define el disco, el arranque y el bitstream de
+**Version de formato: 4.** Define el disco, el arranque y el bitstream de
 video y audio.
 
 La version 2 no definia el contenido del audio de los paquetes (viajaba
 vacio). La 3 lo define y usa el byte 28 de la cabecera, antes reservado,
-para el formato del audio.
+para el formato del audio. La 4 agrega la paleta por franjas horizontales
+(byte 29 de la cabecera) y cambia el tamano de la paleta de los paquetes.
 
 Todo es **big-endian**. El 68000 lee el disco con punteros pelados, sin
 conversiones.
@@ -31,14 +32,15 @@ no es un volumen valido y esta bien.
 | 0–1 | Bootblock (1024 bytes) |
 | 2 … | Reproductor, en sectores consecutivos |
 | siguiente al reproductor … | Datos: bitstream (cabecera + paquetes) |
-| 1719–1758 | Solo en discos de prueba: volcado del framebuffer (Hito 3) |
+| 1680–1735 | Solo en discos de prueba: volcado del framebuffer y del copper list (Hito 3) |
 | 1754–1758 | Solo en discos de medicion: tiempos de decodificacion (Hito 4) |
 | 1759 | Solo en discos de prueba: sector de informacion (`MEMR`, `FBDM` o `PLAY`) |
 
 Los datos empiezan en el primer sector libre despues del reproductor. `mkadf`
 escribe en la cabecera del reproductor donde quedaron. En los discos de
-prueba, `mkadf --reserve-tail 41` garantiza que los datos no pisen la zona
-de volcado; en el disco final esos sectores son para datos.
+prueba, `mkadf --reserve-tail` garantiza que los datos no pisen la zona
+de volcado (80 sectores para el frame fijo, 6 para el de medicion); en el
+disco final esos sectores son para datos.
 
 ---
 
@@ -109,7 +111,7 @@ pasa el bootblock.
 | Offset | Tamano | Contenido |
 |---|---|---|
 | 0 | 4 | `"A5VP"` |
-| 4 | 2 | Version = 3 |
+| 4 | 2 | Version = 4 |
 | 6 | 2 | Flags. Bit 0 = hay audio |
 | 8 | 2 | Ancho logico = 160 |
 | 10 | 2 | Alto logico = 128 |
@@ -121,7 +123,8 @@ pasa el bootblock.
 | 20 | 4 | Cantidad de paquetes = cantidad de frames |
 | 24 | 4 | Bytes de paquetes que siguen a la cabecera |
 | 28 | 1 | Formato del audio: 0 = ninguno, 1 = fib4, 2 = pcm8 |
-| 29 | 3 | Reservado, 0 |
+| 29 | 1 | Filas logicas por franja de paleta (0 = una sola paleta) |
+| 30 | 2 | Reservado, 0 |
 
 Las filas fuera de `y0..y1-1` son las barras del letterbox: nunca cambian y
 quedan en el color 0.
@@ -139,7 +142,7 @@ viaja en su propio paquete y la sincronia es trivial.
 | 2 | 1 | Operacion: 0 = DELTA, 1 = REPETICION |
 | 3 | 1 | Flags. Bit 0 = trae paleta |
 | 4 | 2 | Bytes de audio en este paquete |
-| 6 | … | Paleta: `colores` x 2 bytes, RGB444 como `$0RGB` (si el bit 0 esta prendido) |
+| 6 | … | Paleta: `franjas` x `colores` x 2 bytes, RGB444 como `$0RGB`, franja 0 primero (si el bit 0 esta prendido) |
 | … | … | Audio (los bytes indicados en el offset 4) |
 | … | … | Delta (solo si la operacion es DELTA) |
 | … | 0–1 | Relleno con cero hasta longitud par |
@@ -153,6 +156,24 @@ paquete, sin mirar su contenido.
 
 Un cambio de paleta siempre viaja con un DELTA: una REPETICION nunca trae
 paleta.
+
+### Paleta por franjas
+
+El area activa se divide en franjas horizontales de `F` filas logicas (el
+byte 29 de la cabecera), empezando en `y0`; la ultima puede ser mas corta.
+`franjas = ceil((y1 - y0) / F)`, o 1 si `F` vale 0. Cada franja tiene su
+paleta completa de `colores` entradas, y la fila logica `y` se ve con la
+paleta de la franja `(y - y0) / F`. Las filas fuera de `y0..y1-1` usan la
+franja 0 (son todas color 0).
+
+- **El color 0 es el mismo en todas las franjas.** Es tambien el color del
+  borde, y el Copper lo escribe una sola vez por frame; el decoder de
+  referencia rechaza un paquete que no lo cumpla.
+- **Con 4 bitplanes solo se admite una franja.** El Copper cambia los
+  colores 1..n-1 de una franja al principio de su primera linea de
+  pantalla, antes de que empiece la imagen: 7 colores entran de sobra, 15
+  no (ver `DECISIONS.md`).
+- Maximo 128 franjas (una por fila logica).
 
 ### Delta
 
@@ -234,8 +255,8 @@ informativa: el reproductor no la necesita, solo consume el flujo.
 
 El encoder escribe junto al bitstream un archivo `<salida>.crc`: un CRC-32
 big-endian por frame, calculado sobre el mapa de indices visible
-(160 x 128 bytes, un indice de paleta por pixel logico) seguido de la paleta
-visible serializada en big-endian. El decoder de referencia recalcula lo
+(160 x 128 bytes, un indice de paleta por pixel logico) seguido de las
+paletas visibles de todas las franjas, en orden, serializadas en big-endian. El decoder de referencia recalcula lo
 mismo a partir del bitstream y tiene que coincidir en **todos** los frames.
 
 Si hay audio, despues del ultimo CRC de frame va uno mas: el CRC-32 de
@@ -266,15 +287,19 @@ consecuencias: el codigo de error de trackdisk se muestra en pantalla como
 
 ---
 
-## Volcado del Hito 3 (sectores 1719–1759)
+## Volcado del Hito 3 (sectores 1680–1759)
 
-Lo escribe el reproductor despues de decodificar el primer paquete y antes
-de tomar el hardware, con `CMD_WRITE` + `CMD_UPDATE`.
+Lo escribe el reproductor de prueba (`player\still.s`) despues de
+decodificar el primer paquete y armar su copper list, y antes de tomar el
+hardware, con `CMD_WRITE` + `CMD_UPDATE`.
 
-**Sectores 1719 en adelante:** el framebuffer tal cual esta en Chip RAM:
+**Sectores 1680 en adelante:** el framebuffer tal cual esta en Chip RAM:
 `bitplanes` x 5120 bytes (40 bytes por fila de pantalla x 128 filas), plano
 0 primero. Son los bytes logicos ya doblados por la tabla. Con 3 planos
-ocupa los sectores 1719–1748.
+ocupa los sectores 1680–1709; con 4, hasta el 1719.
+
+**Sectores 1720–1735:** el copper list, 8192 bytes (lo que se reserva; lo
+que importa es el principio, hasta el `$FFFFFFFE` final).
 
 **Sector 1759:**
 
@@ -286,14 +311,16 @@ ocupa los sectores 1719–1748.
 | 12 | 4 | Direccion del copper list |
 | 16 | 4 | Bytes de delta que consumio el decodificador |
 | 20 | 4 | Error de trackdisk al volcar el framebuffer (0 = bien) |
-| 24 | 32 | Paleta leida del paquete: 16 palabras `$0RGB` |
-| 56 | 456 | Cero |
+| 24 | 4 | Error de trackdisk al volcar el copper list (0 = bien) |
+| 28 | 484 | Cero |
 
-`a500vp-dec --still K --still-out <f>` genera lo que tiene que dar:
-`<f>` (el frame K como un solo DELTA desde negro con su paleta), `<f>.fb`
-(el framebuffer esperado, mismo formato que el volcado) y `<f>.ppm` (la
-imagen de referencia). `build.ps1 still` compara el volcado contra `<f>.fb`
-byte a byte.
+`a500vp-dec --still K --still-out <f>` genera el frame K como un solo DELTA
+desde negro con sus paletas (`<f>`), el framebuffer esperado (`<f>.fb`) y la
+imagen de referencia (`<f>.ppm`). `a500vp-dec --in <f> --check-still
+<disco>` compara el volcado byte por byte: el framebuffer contra el frame
+decodificado, y el copper list contra uno de referencia que el decoder arma
+con la misma receta que `build_copper` + `write_palette`, franjas incluidas.
+Es lo que corre `build.ps1 still`.
 
 ---
 

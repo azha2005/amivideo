@@ -8,7 +8,7 @@
 #include "a500vp.h"
 
 #define A5V_MAGIC        "A5VP"
-#define A5V_VERSION      3
+#define A5V_VERSION      4
 #define A5V_HEADER_SIZE  32
 
 /* Formato del audio (byte 28 de la cabecera, desde la version 3). */
@@ -16,6 +16,12 @@
 #define A5V_AUDIO_FIB4   1       /* Fibonacci-delta de 4 bits, 8SVX */
 #define A5V_AUDIO_PCM8   2       /* PCM de 8 bits con signo */
 #define A5V_HDR_AUDIOFMT 28
+
+/* Paleta por franjas (byte 29, desde la version 4): filas logicas por
+ * franja, desde y0; 0 = una sola paleta. Un paquete con paleta trae una
+ * paleta completa por franja, y el color 0 es el mismo en todas. */
+#define A5V_HDR_BANDROWS 29
+#define A5_MAX_BANDS     128
 
 #define A5_MAX_PLANES    4
 #define A5_ROWBYTES      (A5_W / 8)          /* 20 bytes logicos por fila */
@@ -115,8 +121,13 @@ long a5_delta_cost(const A5DeltaStats *st);
 
 /* Escribe la cabecera de 32 bytes del bitstream (docs/FORMAT.md). */
 void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_format,
-                    int audio_period, int y0, int y1, uint32_t npackets,
-                    uint32_t payload);
+                    int audio_period, int y0, int y1, int band_rows,
+                    uint32_t npackets, uint32_t payload);
+
+/* Cuantas franjas hay, y a cual pertenece la fila logica y. Las filas fuera
+ * de y0..y1-1 usan la franja 0 (son color 0, igual en todas). */
+int  a5v_nbands(int band_rows, int y0, int y1);
+int  a5v_band_of(int y, int band_rows, int y0, int nbands);
 
 /* --- audio ---------------------------------------------------------------
  * El audio de todos los paquetes, puesto uno detras del otro, es un solo
