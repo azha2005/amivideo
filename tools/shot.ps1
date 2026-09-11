@@ -48,14 +48,42 @@ $proc = Start-Process -FilePath $WinUAE -ArgumentList @('-f', "`"$cfgOut`"") -Pa
 Write-Host "WinUAE pid $($proc.Id); esperando $Wait s..."
 Start-Sleep -Seconds $Wait
 
-# Captura de la pantalla completa: la ventana de WinUAE esta encima.
-$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-$bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
-$g.Dispose(); $bmp.Dispose()
-Write-Host "captura -> $Out"
+# Captura solo la ventana de WinUAE, con PrintWindow: la ventana se dibuja
+# sola en un bitmap. Copiar la pantalla no sirve: si hay otra ventana encima
+# se captura esa, que puede ser cualquier cosa del escritorio.
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class A5Shot {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int L, T, R, B; }
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+}
+"@
+[A5Shot]::SetProcessDPIAware() | Out-Null
+$proc.Refresh()
+$h = $proc.MainWindowHandle
+if ($h -eq [IntPtr]::Zero) {
+    Write-Host "WinUAE no tiene ventana para capturar."
+} else {
+    $r = New-Object A5Shot+RECT
+    [A5Shot]::GetWindowRect($h, [ref]$r) | Out-Null
+    $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $g.GetHdc()
+    $ok = [A5Shot]::PrintWindow($h, $hdc, 2)     # 2 = PW_RENDERFULLCONTENT
+    $g.ReleaseHdc($hdc)
+    $g.Dispose()
+    if ($ok) {
+        $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
+        Write-Host "captura -> $Out"
+    } else {
+        Write-Host "PrintWindow fallo: sin captura."
+    }
+    $bmp.Dispose()
+}
 
 if (-not $KeepOpen) {
     if (-not $proc.HasExited) { $proc.Kill(); $proc.WaitForExit(10000) | Out-Null }
