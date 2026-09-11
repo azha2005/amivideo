@@ -80,7 +80,8 @@ stage2:
         move.l  #RESULT_OFF,IO_OFFSET(a1)
         jsr     _LVODoIO(a6)
         moveq   #0,d3
-        move.b  IO_ERROR(a1),d3             ; 0 = grabado; $1C = protegido
+        move.b  IO_ERROR(a5),d3             ; 0 = grabado; $1C = protegido
+                                            ; (a5: a1 no sobrevive a DoIO)
 
         move.l  a5,a1                       ; CMD_UPDATE: bajar la pista a disco
         move.w  #CMD_UPDATE,IO_COMMAND(a1)
