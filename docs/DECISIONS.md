@@ -883,7 +883,9 @@ franja de arriba pasa a ser exactamente ese.
 | 0,06 | 11,17 % | 873 456 | liso, pero la cara pierde color |
 | 0,08 | 11,81 % | 874 544 | vuelve al gris de una paleta |
 
-**Decision:** franjas de 16 filas con δ = 0,04 por defecto. Conserva casi
+**Decision (confirmada por Az el 2026-09-11,** despues de mirar una paleta y
+franjas lado a lado, costuras incluidas**):** franjas de 16 filas con
+δ = 0,04 por defecto. Conserva casi
 toda la mejora (de 12,5 % a 10,0 % de pixeles lejos del original) y entra en
 el disco practicamente sin perdida: la tabla de franjas agrando el
 reproductor un sector, y el control de tasa subio el umbral de 0,012 a
