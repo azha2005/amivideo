@@ -943,6 +943,21 @@ bytes ahorra; queda anotado.
 
 ---
 
+## 2026-09-11 — Hito 7: funciona en la A500 real
+
+Az grabo `work\a500vp.adf` (el opening de 22 s, con franjas de paleta y
+audio fib4) en un disquete y lo probo en su A500: segun Az, "funciono a la
+perfeccion". No reporto diferencias con WinUAE, asi que no hubo nada que
+corregir. No hay mediciones propias del hardware real (tiempo de carga,
+sincronia); si alguna vez hacen falta, el disco de medicion (`build.ps1
+play`) graba sus resultados en el mismo disquete y se leen desde el PC.
+
+Antes de entregarlo, el disco final (no el de medicion) se arranco entero en
+WinUAE con `tools\shot.ps1 -Every 5`: carga al mismo ritmo que el de
+medicion y reproduce desde los ~55 s de encendida la maquina.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
