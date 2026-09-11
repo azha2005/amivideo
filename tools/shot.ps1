@@ -2,9 +2,12 @@
     shot.ps1 - arranca el ADF en WinUAE, saca una captura de pantalla y cierra.
 
         .\tools\shot.ps1 -Adf work\a500vp.adf -Out work\shot.png [-Wait 20]
+        .\tools\shot.ps1 -Adf work\a500vp.adf -Out work\t.png -Wait 90 -Every 5
 
     Sirve para ver que hace el reproductor sin tener que mirar el monitor:
-    la captura queda en un PNG que se puede revisar despues.
+    la captura queda en un PNG que se puede revisar despues. Con -Every N
+    saca una cada N segundos hasta -Wait (t_005s.png, t_010s.png, ...): la
+    linea de tiempo de un disco cualquiera, sin el reproductor de medicion.
 #>
 [CmdletBinding()]
 param(
@@ -13,7 +16,8 @@ param(
     [int]$Wait      = 20,
     [string]$WinUAE = 'C:\Program Files\WinUAE\winuae64.exe',
     [string]$Rom    = '',
-    [switch]$KeepOpen
+    [switch]$KeepOpen,
+    [int]$Every     = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,8 +49,6 @@ $lines += 'use_gui=no'
 Set-Content -Path $cfgOut -Value $lines -Encoding ascii
 
 $proc = Start-Process -FilePath $WinUAE -ArgumentList @('-f', "`"$cfgOut`"") -PassThru
-Write-Host "WinUAE pid $($proc.Id); esperando $Wait s..."
-Start-Sleep -Seconds $Wait
 
 # Captura solo la ventana de WinUAE, con PrintWindow: la ventana se dibuja
 # sola en un bitmap. Copiar la pantalla no sirve: si hay otra ventana encima
@@ -63,11 +65,14 @@ public static class A5Shot {
 }
 "@
 [A5Shot]::SetProcessDPIAware() | Out-Null
-$proc.Refresh()
-$h = $proc.MainWindowHandle
-if ($h -eq [IntPtr]::Zero) {
-    Write-Host "WinUAE no tiene ventana para capturar."
-} else {
+
+function Save-Shot([string]$Path) {
+    $proc.Refresh()
+    $h = $proc.MainWindowHandle
+    if ($h -eq [IntPtr]::Zero) {
+        Write-Host "WinUAE no tiene ventana para capturar."
+        return
+    }
     $r = New-Object A5Shot+RECT
     [A5Shot]::GetWindowRect($h, [ref]$r) | Out-Null
     $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
@@ -77,12 +82,27 @@ if ($h -eq [IntPtr]::Zero) {
     $g.ReleaseHdc($hdc)
     $g.Dispose()
     if ($ok) {
-        $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
-        Write-Host "captura -> $Out"
+        $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+        Write-Host "captura -> $Path"
     } else {
         Write-Host "PrintWindow fallo: sin captura."
     }
     $bmp.Dispose()
+}
+
+if ($Every -gt 0) {
+    # Una cada $Every s desde que arranco WinUAE, con el segundo en el nombre.
+    $t0 = Get-Date
+    $base = [System.IO.Path]::ChangeExtension($Out, $null).TrimEnd('.')
+    for ($t = $Every; $t -le $Wait; $t += $Every) {
+        $left = $t - ((Get-Date) - $t0).TotalSeconds
+        if ($left -gt 0) { Start-Sleep -Milliseconds ([int]($left * 1000)) }
+        Save-Shot ('{0}_{1:d3}s.png' -f $base, $t)
+    }
+} else {
+    Write-Host "WinUAE pid $($proc.Id); esperando $Wait s..."
+    Start-Sleep -Seconds $Wait
+    Save-Shot $Out
 }
 
 if (-not $KeepOpen) {
