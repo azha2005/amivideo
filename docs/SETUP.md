@@ -49,6 +49,24 @@ es V36 (Kickstart 2.0) y no se puede usar.
 
 Rutas pisables: `-Vasm`, `-Gcc`, `-WinUAE`, `-Rom`, `-Timeout`.
 
+### Encoder y decoder de referencia
+
+`build.ps1` compila tambien `work\a500vp-enc.exe` y `work\a500vp-dec.exe`.
+
+```powershell
+# bitstream de los primeros 30 s, ajustado al disquete
+.\work\a500vp-enc.exe --in "C:\ruta\al\opening.mp4" --duration 30 `
+    --planes 3 --sharpen 1.2 --out work\video.a5v
+
+# reconstruirlo, verificarlo contra el encoder y sacar el preview con audio
+.\work\a500vp-dec.exe --in work\video.a5v --preview work\preview.mp4 `
+    --audio "C:\ruta\al\opening.mp4" --audio-duration 30
+```
+
+El decoder termina con `VERIFICACION: OK` si reconstruyo todos los frames
+exactamente igual que los simulo el encoder, y sale con codigo 1 si no.
+`a500vp-enc --help` lista todas las opciones.
+
 ## WinUAE
 
 `a500vp.uae` esta en el repo con la maquina objetivo configurada: OCS, 68000

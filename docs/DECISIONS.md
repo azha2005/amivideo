@@ -252,6 +252,187 @@ va a salir por Paula. En `--rate pal` el audio se acelera con
 
 ---
 
+## 2026-09-11 — Hito 2: bitstream v2, mascara de columnas en vez de tramos
+
+**Decision:** el delta describe cada fila modificada con una **mascara de 20
+bits** (una por byte logico) y, por cada columna marcada, manda **todos** los
+planos. Reemplaza al formato v1 que proponia `CLAUDE.md` como punto de
+partida: por fila y por plano, tramos "saltar N, escribir M".
+
+**Metodo:** se codifico el opening (30 s, 8 colores, ajustado al presupuesto)
+con v1 y el decoder de referencia desgloso a donde iban los bytes:
+
+| v1 | bytes | % |
+|---|---|---|
+| cabeceras de tramo (2 bytes cada una) | 333 636 | 37,9 |
+| cuenta de tramos por fila-plano | 78 914 | 9,0 |
+| mascara de planos por fila | 27 762 | 3,2 |
+| datos literales | 428 972 | 48,7 |
+
+Los tramos promediaban **2,57 bytes**: se pagaban 2 bytes de cabecera por
+cada 2,57 de dato. Y en una fila modificada cambiaban **2,84 de 3 planos**,
+casi siempre en las mismas columnas. Describir por separado que cambio en
+cada plano era tirar bytes.
+
+**Resultado, v2 con la misma fuente y el mismo presupuesto (883 712 bytes):**
+
+| | v1 | v2 |
+|---|---|---|
+| 8 colores, error final (Oklab) | 0,0708 | **0,0471** |
+| 16 colores, error final | 0,1067 | **0,0763** |
+| Mascara de columnas / datos | — | 11,7 % / 86,8 % |
+
+Con 8 colores v2 ademas deja 84 KB sin usar (ver el punto sobre el control
+de tasa, mas abajo). El decoder de referencia reconstruye los 750 frames de
+las dos variantes bit a bit igual que el encoder.
+
+**Costo de decodificacion:** el lazo del 68000 pasa a recorrer 20 bits por
+fila en vez de interpretar tramos. Con el modelo (sin calibrar) el peor frame
+queda en 39,8 ms con 8 colores y 49,5 ms con 16.
+
+---
+
+## 2026-09-11 — La repeticion usa el mismo criterio que la calidad
+
+**Decision:** un frame se repite si, aplicando el filtro de calidad contra el
+buffer **visible** (con un umbral 1,5 veces mas permisivo, `--repeat-boost`),
+no queda ningun pixel que valga la pena actualizar.
+
+**Motivo:** al principio la repeticion tenia un umbral propio y fijo (error
+medio < 0,010). Al subir la perdida para entrar en el presupuesto, el buffer
+visible se alejaba cada vez mas del frame ideal y las repeticiones caian de
+~50 % a **3,3 %**, justo cuando mas falta hacian. Con el criterio unificado,
+ajustado al presupuesto, 8 colores repite el 45 % de los frames y 16 colores
+el 56 %.
+
+---
+
+## 2026-09-11 — Bug en la regla que descarta filas enteras
+
+La calidad con perdida descartaba una fila si la suma de errores que quedaban
+**dividida por 160** era chica. Eso hacia parecer despreciable un cambio
+grande concentrado en tres pixeles (3 x 1,0 / 160 = 0,019) y se tiraban filas
+con detalle real. Ahora se compara la suma sin dividir. Los streams salen mas
+grandes a igual umbral, pero porque ya no se pierde lo que no se debia perder.
+
+---
+
+## 2026-09-11 — Histeresis temporal en el cuantizador
+
+**Decision:** al cuantizar un frame, si el indice que tenia el pixel en el
+frame anterior esta a menos de `--stability` (Oklab) del optimo, se lo deja.
+Default **0,10**.
+
+**Motivo:** la fuente es un h264 de 2 Mbit/s. Su ruido de compresion no se
+ve a 160 px de ancho, pero hace que en zonas quietas los pixeles salten entre
+dos colores vecinos de la paleta, y cada salto se paga en bytes de delta. Con
+16 colores es peor, porque los colores de la paleta estan mas cerca entre si.
+
+**Medido** (16 colores, v1, casi sin perdida): 2,05 MB sin histeresis,
+1,91 MB con 0,03, 1,84 MB con 0,06, **1,41 MB con 0,10**. El error final
+paso de 0,0844 a 0,0921: un 31 % menos de bytes por casi nada.
+
+---
+
+## 2026-09-11 — El denoise temporal empeora las cosas
+
+Se probo `hqdn3d` antes de escalar (`--denoise`), para limpiar el ruido de
+la fuente. **Los streams salieron mas grandes**: de 1,49 a 1,56 MB con 8
+colores y de 2,33 a 2,39 MB con 16. El filtrado temporal convierte el ruido
+en derivas lentas que igual cruzan los limites entre colores de la paleta, y
+la histeresis ya hacia ese trabajo mejor. La opcion queda, apagada por
+defecto.
+
+---
+
+## 2026-09-11 — 16 colores contra 8 con el presupuesto del disquete
+
+Az eligio 16 colores en el Hito 1 mirando el preview **sin comprimir**, donde
+16 se ve claramente mejor (error de cuantizacion 0,0318 contra 0,0446). Con
+el bitstream real y el disquete como limite, la cuenta cambia:
+
+| 30 s, 883 712 bytes | 8 colores | 16 colores |
+|---|---|---|
+| Tamano casi sin perdida | 1,63 MB | 2,31 MB |
+| Perdida necesaria para entrar | umbral 0,207 | umbral 0,271 |
+| Frames repetidos | 45 % | 56 % |
+| Error final contra su ideal | **0,0471** | 0,0763 |
+| Peor frame, modelo sin calibrar | 39,8 ms | 49,5 ms |
+
+Un 4.o bitplane son 33 % mas bytes por columna, y con un solo disquete eso se
+paga en perdida y en frames sostenidos (movimiento mas entrecortado).
+
+**Pero ninguna de las dos variantes es aceptable asi.** Ver la entrada
+siguiente: los errores de esta tabla son medias, y la media escondia un
+salpicado muy visible.
+
+---
+
+## 2026-09-11 — La perdida por pixel produce salpicado: no sirve a este nivel
+
+**Hallazgo:** mirando los previews decodificados (no las estadisticas), los
+streams ajustados al disquete tienen **pixeles viejos desparramados** por
+toda la imagen: restos de la escena anterior sobre la cara de un personaje,
+estela en el fuego. El control, el mismo opening casi sin perdida (1,63 MB),
+sale limpio: el formato y el decoder estan bien, y el decoder verifica bit a
+bit contra el encoder. El problema es la estrategia de perdida.
+
+**Por que:** para meter 1,63 MB en ~880 KB, el control de tasa subio el
+umbral por pixel hasta 0,207 en Oklab. Eso quiere decir "no actualices
+ningun pixel cuyo color este a menos de 0,2 del correcto", y 0,2 es
+muchisimo. Cada pixel decide solo, sin mirar a sus vecinos, y el resultado
+es ruido sal-y-pimienta que ademas persiste frame tras frame.
+
+**Leccion de metodo:** el error *medio* (0,047) parecia razonable y no lo
+era. El encoder ahora informa tambien el **porcentaje de pixeles activos con
+error visible (> 0,1)**, que es lo que el ojo ve. Ningun parametro se da por
+bueno sin mirar el preview decodificado.
+
+**Consecuencia:** hay que reducir ~1,9x de otra manera. Opciones a medir y
+decidir con Az: tope de cadencia (`--min-hold`, el anime esta animado en dos),
+perdida coherente por regiones en vez de por pixel, clip mas corto.
+
+---
+
+## 2026-09-11 — Tope de cadencia (`--min-hold`): medido
+
+**Que es:** la imagen se actualiza como mucho cada N huecos de pantalla
+(N = 2 son hasta 12,5 fps de imagenes distintas; N = 3, hasta 8,3). Los
+cortes de escena pasan siempre. El anime esta animado mayormente "en dos",
+asi que buena parte de esos frames ya eran repetidos.
+
+**Medido** (8 colores, primeros 30 s, realce 1,2):
+
+| `--min-hold` | casi sin perdida | ajustado a 883 712: pixeles con error visible |
+|---|---|---|
+| 1 | 1 633 634 bytes | 27,2 % |
+| 2 | 1 087 810 bytes | 18,1 % |
+| 3 | **833 820 bytes** | 6,0 % |
+
+Con N = 3 el opening entra en 883 KB **sin perdida**. Su 6 % de "error
+visible" no es salpicado: es el retraso de sostener una imagen hasta 3
+huecos en las zonas que se mueven, o sea movimiento mas entrecortado. La
+metrica no distingue esos dos casos; el ojo si.
+
+**Correccion de presupuesto:** esos 883 KB eran solo video. El audio del
+Hito 5 (fib4, 4 bits, periodo 443 = 8006,5 Hz) son **4003 bytes/s**:
+~120 KB en 30 s. El presupuesto real de video para 30 s es ~763 KB, y ahi
+ya ni N = 3 entra sin perdida.
+
+---
+
+## 2026-09-11 — El control de tasa deja presupuesto sin usar
+
+La busqueda binaria sobre el umbral de calidad supone que mas umbral siempre
+da menos bytes, y en promedio es asi, pero no de forma suave: una repeticion
+de mas cambia el contenido del buffer oculto para todos los frames que
+siguen, y el tamano salta. Con 8 colores la busqueda termino en 799 KB contra
+un tope de 883 KB: **84 KB (10 %) sin usar** que podrian ir a calidad. Hay
+que mejorarlo (por ejemplo, un ajuste fino por escena despues de la busqueda
+global).
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - **Velocidad de lectura de trackdisk.** `CLAUDE.md` estima 15–25 KB/s. Sin
