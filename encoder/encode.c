@@ -14,6 +14,7 @@
 #include <time.h>
 #include "a500vp.h"
 #include "stream.h"
+#include "adf.h"
 
 /* Un pixel logico es 2x2 pixeles de pantalla, y la pantalla de 320x256 se ve
  * en un tubo 4:3. O sea que el pixel logico es 1,0667 veces mas ancho que
@@ -36,6 +37,137 @@ static void die(const char *msg)
 }
 
 static int even(int v) { return v & ~1; }
+
+static uint8_t *read_file(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    long n;
+    uint8_t *p;
+
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    p = malloc(n > 0 ? (size_t)n : 1);
+    if (!p || n < 0 || fread(p, 1, (size_t)n, f) != (size_t)n) {
+        fclose(f); free(p); return NULL;
+    }
+    fclose(f);
+    *len = (size_t)n;
+    return p;
+}
+
+/* ====================================================================
+ * Audio
+ * ==================================================================== */
+
+typedef struct {
+    int      format;       /* A5V_AUDIO_*; NONE si no hay audio */
+    int      period;
+    double   hz;           /* 3546895 / periodo, exacto */
+    size_t   nsamples;     /* S(nframes-1): lo que suena en todo el video */
+    uint8_t *bytes;        /* el flujo codificado, todos los paquetes seguidos */
+    size_t   nbytes;
+    int8_t  *recon;        /* lo que va a sonar, muestra por muestra */
+    double   snr;          /* dB, lo que suena contra la entrada */
+    double   peak;         /* pico de la entrada en escala de 8 bits */
+    long     clipped;      /* muestras recortadas por la ganancia */
+} A5Audio;
+
+/* Lee el audio de la fuente y lo codifica entero como un solo flujo.
+ *
+ * ffmpeg no puede entregar 8006,535 Hz: solo frecuencias enteras. Se le pide
+ * la entera de arriba (con su filtro antialias, que es bueno) y el ultimo
+ * paso lo hace una interpolacion lineal a la frecuencia EXACTA de Paula. La
+ * razon es 1,00006: la interpolacion casi no filtra y no hay deriva.
+ *
+ * speed es cuanto mas rapido corre el video que la fuente (1 en native). En
+ * pal el audio se toma mas rapido y sube de tono; se le pide a ffmpeg una
+ * frecuencia mas baja en la misma proporcion para que su antialias corte
+ * donde corresponde despues de acelerar. */
+static void encode_audio(A5Audio *au, const char *in, double start,
+                         double duration, double speed, size_t nframes,
+                         double gain)
+{
+    int rate = (int)ceil(au->hz / speed);
+    double step = speed * rate / au->hz;   /* muestras de ffmpeg por muestra */
+    FILE *f = a5_open_audio(in, start, duration, NULL, rate);
+    int16_t *raw = NULL;
+    size_t nraw = 0, cap = 0, i;
+    float *x;
+    double sig = 0, noise = 0;
+    int acc = 0;
+    uint8_t b2[2];
+
+    if (!f) die("no pude arrancar ffmpeg para el audio");
+    while (fread(b2, 1, 2, f) == 2) {
+        if (nraw == cap) {
+            cap = cap ? cap * 2 : 65536;
+            raw = realloc(raw, cap * sizeof *raw);
+            if (!raw) die("sin memoria");
+        }
+        raw[nraw++] = (int16_t)(b2[0] | (b2[1] << 8));   /* s16le */
+    }
+    a5_pclose(f);
+
+    au->nsamples = a5_audio_samples_through((uint32_t)nframes - 1, au->hz);
+    x = malloc(au->nsamples * sizeof *x);
+    au->recon = malloc(au->nsamples ? au->nsamples : 1);
+    au->nbytes = a5_audio_bytes(au->format, au->nsamples);
+    au->bytes = calloc(au->nbytes ? au->nbytes : 1, 1);
+    if (!x || !au->recon || !au->bytes) die("sin memoria");
+
+    /* Si la fuente se acaba antes que el video, el resto es silencio. */
+    au->peak = 0;
+    au->clipped = 0;
+    for (i = 0; i < au->nsamples; i++) {
+        double pos = i * step, fr, a, b, v;
+        size_t k = (size_t)pos;
+        fr = pos - (double)k;
+        a = k < nraw ? raw[k] : 0;
+        b = k + 1 < nraw ? raw[k + 1] : 0;
+        v = (a + (b - a) * fr) / 256.0 * gain;
+        if (fabs(v) > au->peak) au->peak = fabs(v);
+        if (v > 127)  { v = 127;  au->clipped++; }
+        if (v < -128) { v = -128; au->clipped++; }
+        x[i] = (float)v;
+    }
+    free(raw);
+
+    if (au->format == A5V_AUDIO_FIB4) {
+        a5_fib4_encode(x, au->nsamples, au->bytes, au->recon, &acc);
+    } else {
+        for (i = 0; i < au->nsamples; i++) {
+            long v = lround(x[i]);
+            if (v > 127) v = 127;
+            if (v < -128) v = -128;
+            au->recon[i] = (int8_t)v;
+            au->bytes[i] = (uint8_t)(int8_t)v;
+        }
+    }
+
+    for (i = 0; i < au->nsamples; i++) {
+        double e = x[i] - au->recon[i];
+        sig += (double)x[i] * x[i];
+        noise += e * e;
+    }
+    au->snr = noise > 0 ? 10 * log10(sig / noise) : 99;
+    free(x);
+}
+
+/* Los bytes de audio del paquete n: las muestras S(n-1)..S(n)-1. */
+static const uint8_t *audio_slice(const A5Audio *au, size_t n, size_t *len)
+{
+    size_t a, b;
+
+    if (!au || au->format == A5V_AUDIO_NONE) { *len = 0; return NULL; }
+    a = n ? a5_audio_samples_through((uint32_t)n - 1, au->hz) : 0;
+    b = a5_audio_samples_through((uint32_t)n, au->hz);
+    a = a5_audio_bytes(au->format, a);
+    b = a5_audio_bytes(au->format, b);
+    *len = b - a;
+    return au->bytes + a;
+}
 
 /* ====================================================================
  * Bitstream
@@ -150,10 +282,27 @@ static void apply_quality(uint8_t *target, const uint8_t *hidden,
 }
 
 /* VBL que llega tarde un delta que empieza a decodificarse en start y cuesta
- * cost ciclos, si le toca verse en due. due esta sobre la grilla de VBL. */
-static int late_vbls(double start, long cost, double due, double P)
+ * cost ciclos, si le toca verse en due. due esta sobre la grilla de VBL.
+ *
+ * Los llenados de audio llegan cada fillp ciclos desde el VBL del frame 0 y
+ * cada uno le roba fillc al delta; al alargarlo puede meter otro. */
+static int late_vbls(double start, long cost, double due, double P,
+                     double fillp, double fillc)
 {
-    double end = start + (double)cost;
+    double end;
+
+    /* Si al empezar hay un llenado en curso, el delta espera a que termine:
+     * el lazo principal no corre hasta entonces. */
+    if (fillc > 0 && start >= 0) {
+        double k = floor(start / fillp);
+        if (k * fillp + fillc > start) start = k * fillp + fillc;
+    }
+    end = start + (double)cost;
+    if (fillc > 0) {
+        double k = ceil(start / fillp);
+        if (k < 0) k = 0;
+        while (k * fillp < end) { end += fillc; k++; }
+    }
     if (end <= due) return 0;
     return (int)ceil((end - due) / P);
 }
@@ -197,7 +346,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
                          const Scene *scenes, int nscenes, int planes,
                          int ncolors, int y0, int y1,
                          double pixel_thr, double repeat_boost, long cyc_limit,
-                         int min_hold, int max_late)
+                         int min_hold, int max_late, const A5Audio *au)
 {
     size_t fsz = (size_t)A5_W * A5_H;
     uint8_t *vis = calloc(fsz, 1);
@@ -212,6 +361,9 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
      * VBL del frame 0. El reproductor empieza a decodificar 2 VBL antes. */
     double P = A5_CYC_PER_VBL;
     double t_free = -2.0 * P;
+    int afmt = au ? au->format : A5V_AUDIO_NONE;
+    double fillp = afmt ? 2.0 * A5_AUD_BUF_SAMPLES * au->period : 1.0;
+    double fillc = (double)a5_audio_fill_cost(afmt);
 
     if (!vis || !hid || !tgt) die("sin memoria");
     memset(st, 0, sizeof *st);
@@ -228,6 +380,8 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         double thr = pixel_thr;
         double due = 2.0 * (double)n * P;    /* VBL en que se ve este frame */
         int attempt, late = 0;
+        size_t alen;
+        const uint8_t *ab = audio_slice(au, n, &alen);
 
         while (s + 1 < nscenes && (int)n >= scenes[s + 1].start) s++;
         pal = &scenes[s].pal;
@@ -237,7 +391,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
          * huecos. Un corte de escena siempre pasa. */
         if (!newscene && vispal == pal && min_hold > 1 &&
             n - last_delta < (size_t)min_hold) {
-            put_packet(st, A5V_OP_REPEAT, NULL, ncolors, NULL, NULL, 0);
+            put_packet(st, A5V_OP_REPEAT, NULL, ncolors, NULL, ab, alen);
             st->nrepeat++;
             st->err_sum += idx_error(vis, ideal, pal, pal, y0, y1);
             st->bad_pixels += idx_bad(vis, ideal, pal, y0, y1);
@@ -259,7 +413,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
             apply_quality(tgt, vis, pal, y0, y1, thr * repeat_boost,
                           thr * repeat_boost);
             if (!memcmp(tgt, vis, fsz)) {
-                put_packet(st, A5V_OP_REPEAT, NULL, ncolors, NULL, NULL, 0);
+                put_packet(st, A5V_OP_REPEAT, NULL, ncolors, NULL, ab, alen);
                 st->nrepeat++;
                 st->err_sum += idx_error(vis, ideal, pal, pal, y0, y1);
                 st->bad_pixels += idx_bad(vis, ideal, pal, y0, y1);
@@ -283,11 +437,12 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
             apply_quality(tgt, hid, pal, y0, y1, thr, thr);
             video.len = 0;
             a5_delta_encode(&video, hid, tgt, planes, &ds);
-            late = late_vbls(t_free, ds.cycles, due, P);
+            late = late_vbls(t_free, ds.cycles, due, P, fillp, fillc);
             capped = !cyc_limit || ds.cycles <= cyc_limit;
             if (capped && late <= max_late) break;
             /* Si ni un delta vacio llega a tiempo, degradar no arregla nada. */
-            if (capped && late_vbls(t_free, A5_CYC_FRAME, due, P) > max_late)
+            if (capped && late_vbls(t_free, A5_CYC_FRAME, due, P, fillp,
+                                    fillc) > max_late)
                 break;
             thr = thr > 0 ? thr * 2 : 0.01;
         }
@@ -307,7 +462,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         t_free = due + late * P;              /* el intercambio de este delta */
 
         put_packet(st, A5V_OP_DELTA, newscene ? pal : NULL, ncolors,
-                   &video, NULL, 0);
+                   &video, ab, alen);
         st->ndelta++;
         if (newscene) st->npalette++;
         last_delta = n;
@@ -336,10 +491,19 @@ static void usage(void)
 "  --out PATH              bitstream de salida (work\\video.a5v)\n"
 "  --preview PATH          mp4 opcional con la cuantizacion sin comprimir\n"
 "                          (el preview de verdad lo hace a500vp-dec)\n"
+"  --adf PATH              ademas, el disco entero listo para bootear\n"
+"  --boot PATH             bootblock para --adf (work\\boot.bin)\n"
+"  --player PATH           reproductor para --adf (work\\player.bin)\n"
+"  --reserve-tail N        sectores del final del disco que quedan libres (0)\n"
 "  --quality N             perdida permitida, 0 = sin perdida (8)\n"
-"  --budget BYTES          tope de tamano del video; 0 = sin tope\n"
-"                          (por defecto: 883712 menos el audio)\n"
-"  --audio-period N        periodo de Paula del audio (443 = 8006,5 Hz)\n"
+"  --budget BYTES          tope de bytes del bitstream, audio incluido;\n"
+"                          0 = sin tope (por defecto: lo que queda en el disco\n"
+"                          despues del reproductor, o 883712 sin --adf)\n"
+"  --audio-format F        fib4 | pcm8 | none (fib4 si la fuente tiene audio)\n"
+"  --audio-rate HZ         frecuencia aproximada; se usa el periodo entero mas\n"
+"                          cercano y su frecuencia exacta (8006,5)\n"
+"  --audio-period N        periodo de Paula, en lugar de --audio-rate (443)\n"
+"  --audio-gain F          ganancia antes de pasar a 8 bits (1.0)\n"
 "  --repeat-boost F        cuanto mas permisivo es repetir que actualizar (1.5)\n"
 "  --stability F           histeresis temporal del cuantizador (0.07)\n"
 "  --max-late N            VBL de atraso que se toleran antes de degradar\n"
@@ -365,7 +529,7 @@ static void usage(void)
 "  --scene-threshold F     distancia Oklab media que dispara un corte (0.12)\n"
 "  --min-scene N           frames minimos por escena (6)\n"
 "  --preview-scale N       ampliacion del preview (2 = 640x512)\n"
-"  --no-audio              preview sin audio\n"
+"  --no-audio              sin audio, ni en el disco ni en el preview\n"
 "  --seed N                semilla del k-means (1)\n");
 }
 
@@ -386,8 +550,16 @@ int main(int argc, char **argv)
     int    min_hold = 2;
     int    max_late = 2;
     long   cyc_limit;
-    long   budget = -1;             /* -1 = disco menos el audio */
+    long   budget = -1;             /* -1 = lo que queda en el disco */
     int    audio_period = 443;
+    int    audio_format = -1;       /* -1 = fib4 si la fuente tiene audio */
+    double audio_gain = 1.0;
+    const char *adf_path = NULL;
+    const char *boot_path = "work\\boot.bin", *player_path = "work\\player.bin";
+    int    reserve_tail = 0;
+    uint8_t *boot = NULL, *player = NULL;
+    size_t bootlen = 0, playerlen = 0;
+    A5Audio au;
     uint8_t *idx = NULL;
     int i;
 
@@ -438,6 +610,23 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--min-hold") && has)      min_hold = atoi(argv[++i]);
         else if (!strcmp(a, "--max-late") && has)      max_late = atoi(argv[++i]);
         else if (!strcmp(a, "--audio-period") && has)  audio_period = atoi(argv[++i]);
+        else if (!strcmp(a, "--audio-rate") && has) {
+            double r = atof(argv[++i]);
+            if (r <= 0) die("--audio-rate tiene que ser positivo");
+            audio_period = (int)(A5_CCK_PAL / r + 0.5);
+        }
+        else if (!strcmp(a, "--audio-gain") && has)    audio_gain = atof(argv[++i]);
+        else if (!strcmp(a, "--audio-format") && has) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "fib4"))      audio_format = A5V_AUDIO_FIB4;
+            else if (!strcmp(v, "pcm8")) audio_format = A5V_AUDIO_PCM8;
+            else if (!strcmp(v, "none")) audio_format = A5V_AUDIO_NONE;
+            else die("--audio-format: fib4, pcm8 o none");
+        }
+        else if (!strcmp(a, "--adf") && has)           adf_path = argv[++i];
+        else if (!strcmp(a, "--boot") && has)          boot_path = argv[++i];
+        else if (!strcmp(a, "--player") && has)        player_path = argv[++i];
+        else if (!strcmp(a, "--reserve-tail") && has)  reserve_tail = atoi(argv[++i]);
         else if (!strcmp(a, "--aspect") && has) {
             const char *v = argv[++i];
             if (!strcmp(v, "letterbox"))    aspect = ASPECT_LETTERBOX;
@@ -459,8 +648,20 @@ int main(int argc, char **argv)
     }
     if (!in) { usage(); return 2; }
     if (planes < 1 || planes > 4) die("--planes tiene que ser 1..4");
+    if (audio_period < 124 || audio_period > 65535)
+        die("periodo de audio fuera de rango (124..65535; Paula no baja de 124)");
+    if (reserve_tail < 0) die("--reserve-tail no puede ser negativo");
     cyc_limit = (long)(A5_CPU_HZ * frame_ms / 1000.0);
     ncolors = 1 << planes;
+
+    /* El reproductor se lee antes de codificar: su tamano decide cuanto disco
+     * queda para los datos. */
+    if (adf_path) {
+        boot = read_file(boot_path, &bootlen);
+        player = read_file(player_path, &playerlen);
+        if (!boot) die("no pude leer el bootblock (--boot)");
+        if (!player) die("no pude leer el reproductor (--player)");
+    }
 
     /* --- fuente --------------------------------------------------- */
     if (a5_probe(in, &src) != 0) die("ffprobe no pudo leer la fuente");
@@ -606,17 +807,56 @@ int main(int argc, char **argv)
                nsrc / src.fps, nframes / A5_VIDEO_FPS,
                (unsigned long)(nframes - nsrc));
 
-    /* Presupuesto por defecto: el disco menos lo que se va a llevar el audio
-     * (Hito 5: fib4, 4 bits por muestra, a 3546895/periodo Hz exactos). Se
-     * reserva desde ahora para no volver a presupuestar el video contra un
-     * disco que en realidad tiene ~4 KB/s menos. */
+    /* --- audio -------------------------------------------------------
+     * Va dentro de los paquetes, asi que el presupuesto es uno solo: cabecera
+     * mas paquetes, audio incluido. El audio no se negocia con el control de
+     * tasa; lo que se ajusta es el video. */
+    memset(&au, 0, sizeof au);
+    if (audio_format < 0)
+        audio_format = want_audio && src.audio_rate ? A5V_AUDIO_FIB4
+                                                    : A5V_AUDIO_NONE;
+    if (!want_audio) audio_format = A5V_AUDIO_NONE;
+    if (audio_format != A5V_AUDIO_NONE && !src.audio_rate) {
+        printf("  AVISO: la fuente no tiene audio; el disco sale mudo\n");
+        audio_format = A5V_AUDIO_NONE;
+    }
+    au.format = audio_format;
+    au.period = audio_period;
+    au.hz = A5_CCK_PAL / audio_period;
+    if (au.format != A5V_AUDIO_NONE) {
+        encode_audio(&au, in, start, duration,
+                     pal_speedup ? A5_VIDEO_FPS / src.fps : 1.0, nframes,
+                     audio_gain);
+        printf("audio      : %s, periodo %d = %.3f Hz, %lu muestras (%.3f s), "
+               "%lu bytes = %.2f KB/s\n",
+               au.format == A5V_AUDIO_FIB4 ? "fib4" : "pcm8", au.period, au.hz,
+               (unsigned long)au.nsamples, au.nsamples / au.hz,
+               (unsigned long)au.nbytes,
+               au.nbytes / 1024.0 / (nframes / A5_VIDEO_FPS));
+        printf("             ganancia %.2f, pico %.1f de 127, %ld muestras "
+               "recortadas, SNR %.1f dB\n", audio_gain, au.peak, au.clipped,
+               au.snr);
+    }
+
+    /* Presupuesto por defecto: con --adf, exactamente lo que queda en el
+     * disco despues del bootblock, el reproductor y la cola reservada. La
+     * memoria no limita: medida en el Hito 0, entre Chip y slow sobran ~40 KB
+     * (docs/DECISIONS.md). */
     if (budget < 0) {
-        double paula_hz = A5_CCK_PAL / audio_period;
-        long reserve = (long)ceil(nframes / A5_VIDEO_FPS * paula_hz / 2.0);
-        budget = A5V_DEFAULT_BUDGET - reserve;
-        printf("presupuesto: %ld bytes de video = %d de disco - %ld de audio "
-               "(fib4 a %.1f Hz)\n", budget, A5V_DEFAULT_BUDGET, reserve,
-               paula_hz);
+        if (adf_path) {
+            long sectors = ADF_SECTORS - ADF_BOOT_SECTORS
+                         - (long)adf_sectors_for(playerlen) - reserve_tail;
+            budget = sectors * ADF_SECTOR_SIZE;
+            printf("presupuesto: %ld bytes = %ld sectores libres (reproductor "
+                   "%lu bytes, %d reservados)\n", budget, sectors,
+                   (unsigned long)playerlen, reserve_tail);
+        } else {
+            budget = A5V_DEFAULT_BUDGET;
+            printf("presupuesto: %ld bytes (sin --adf, estimado)\n", budget);
+        }
+        if (au.nbytes)
+            printf("             %lu para el audio, %ld para el video\n",
+                   (unsigned long)au.nbytes, budget - (long)au.nbytes);
     }
 
     /* --- deteccion de cortes ---------------------------------------- */
@@ -799,7 +1039,8 @@ int main(int argc, char **argv)
         int pass = 0;
 
         build_stream(&st, idx, nframes, scenes, nscenes, planes, ncolors,
-                     y0, y1, lo, repeat_boost, cyc_limit, min_hold, max_late);
+                     y0, y1, lo, repeat_boost, cyc_limit, min_hold, max_late,
+                     &au);
         total = A5V_HEADER_SIZE + st.buf.len;
         printf("\nbitstream  : calidad %.4f -> %lu bytes\n", lo,
                (unsigned long)total);
@@ -810,7 +1051,8 @@ int main(int argc, char **argv)
                 hi *= 2;
                 a5buf_free(&st.buf); free(st.crc);
                 build_stream(&st, idx, nframes, scenes, nscenes, planes,
-                             ncolors, y0, y1, hi, repeat_boost, cyc_limit, min_hold, max_late);
+                             ncolors, y0, y1, hi, repeat_boost, cyc_limit,
+                             min_hold, max_late, &au);
                 total = A5V_HEADER_SIZE + st.buf.len;
                 printf("             calidad %.4f -> %lu bytes\n", hi,
                        (unsigned long)total);
@@ -820,7 +1062,8 @@ int main(int argc, char **argv)
                 double mid = (lo + hi) / 2;
                 A5Stream t2;
                 build_stream(&t2, idx, nframes, scenes, nscenes, planes,
-                             ncolors, y0, y1, mid, repeat_boost, cyc_limit, min_hold, max_late);
+                             ncolors, y0, y1, mid, repeat_boost, cyc_limit,
+                             min_hold, max_late, &au);
                 if (A5V_HEADER_SIZE + t2.buf.len <= (size_t)budget) {
                     a5buf_free(&st.buf); free(st.crc);
                     st = t2; hi = mid; total = A5V_HEADER_SIZE + st.buf.len;
@@ -841,23 +1084,31 @@ int main(int argc, char **argv)
 
             if (!f) die("no pude abrir el archivo de salida");
             a5buf_init(&hdr);
-            a5v_put_header(&hdr, planes, ncolors, 0 /* sin audio aun */,
+            a5v_put_header(&hdr, planes, ncolors, au.format, au.period,
                            y0, y1, (uint32_t)nframes, (uint32_t)st.buf.len);
             fwrite(hdr.p, 1, hdr.len, f);
             fwrite(st.buf.p, 1, st.buf.len, f);
             fclose(f);
-            a5buf_free(&hdr);
 
+            /* Un CRC por frame y, si hay audio, uno mas de todo lo que suena
+             * (docs/FORMAT.md, Verificacion). */
             snprintf(crcpath, sizeof crcpath, "%s.crc", out);
             f = fopen(crcpath, "wb");
             if (f) {
                 size_t n;
-                for (n = 0; n < nframes; n++) {
+                for (n = 0; n <= nframes; n++) {
+                    uint32_t c;
                     uint8_t b[4];
-                    b[0] = (uint8_t)(st.crc[n] >> 24);
-                    b[1] = (uint8_t)(st.crc[n] >> 16);
-                    b[2] = (uint8_t)(st.crc[n] >> 8);
-                    b[3] = (uint8_t)st.crc[n];
+                    if (n == nframes) {
+                        if (au.format == A5V_AUDIO_NONE) break;
+                        c = a5_crc32(au.recon, au.nsamples, 0);
+                    } else {
+                        c = st.crc[n];
+                    }
+                    b[0] = (uint8_t)(c >> 24);
+                    b[1] = (uint8_t)(c >> 16);
+                    b[2] = (uint8_t)(c >> 8);
+                    b[3] = (uint8_t)c;
                     fwrite(b, 1, 4, f);
                 }
                 fclose(f);
@@ -866,6 +1117,35 @@ int main(int argc, char **argv)
             printf("\nsalida     : %s (%lu bytes)\n", out,
                    (unsigned long)total);
             printf("             %s (checksums para el decoder)\n", crcpath);
+
+            /* El disco entero: los datos son la cabecera y los paquetes, tal
+             * cual el .a5v. */
+            if (adf_path) {
+                uint8_t *disk = calloc(ADF_SIZE, 1);
+                A5Buf data;
+                AdfLayout lay;
+                const char *err;
+
+                if (!disk) die("sin memoria");
+                a5buf_init(&data);
+                a5buf_write(&data, hdr.p, hdr.len);
+                a5buf_write(&data, st.buf.p, st.buf.len);
+                err = adf_assemble(disk, boot, bootlen, player, playerlen,
+                                   data.p, data.len, reserve_tail, &lay);
+                if (err) die(err);
+                f = fopen(adf_path, "wb");
+                if (!f || fwrite(disk, 1, ADF_SIZE, f) != ADF_SIZE)
+                    die("no pude escribir el ADF");
+                fclose(f);
+                printf("disco      : %s\n", adf_path);
+                printf("             reproductor en %u sectores, datos desde "
+                       "el %u, %u de %u sectores usados (%u libres)\n",
+                       lay.player_sectors, lay.data_sector, lay.used,
+                       lay.limit, lay.limit - lay.used);
+                a5buf_free(&data);
+                free(disk);
+            }
+            a5buf_free(&hdr);
         }
 
         /* --- estadisticas del bitstream ---------------------------- */
@@ -876,8 +1156,9 @@ int main(int argc, char **argv)
         printf("bytes/frame: %.1f de media, %lu el peor (frame %d)\n",
                (double)st.buf.len / nframes, (unsigned long)st.maxpacket,
                st.maxpacket_frame);
-        printf("tasa       : %.1f KB/s de video\n",
-               st.buf.len / 1024.0 / (nframes / A5_VIDEO_FPS));
+        printf("tasa       : %.1f KB/s de video + %.1f KB/s de audio\n",
+               (st.buf.len - au.nbytes) / 1024.0 / (nframes / A5_VIDEO_FPS),
+               au.nbytes / 1024.0 / (nframes / A5_VIDEO_FPS));
         printf("decodif.   : peor delta %ld ciclos = %.1f ms (frame %d), "
                "con el modelo medido\n",
                st.maxcycles, st.maxcycles * 1000.0 / A5_CPU_HZ,
@@ -909,5 +1190,6 @@ int main(int argc, char **argv)
     for (i = 0; (size_t)i < nsrc; i++) free(srcframes[i]);
     free(srcframes); free(frames); free(idx);
     free(prev); free(cur); free(delta); free(scenes);
+    free(au.bytes); free(au.recon); free(boot); free(player);
     return 0;
 }
