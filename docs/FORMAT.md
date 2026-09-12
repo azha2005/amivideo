@@ -1,12 +1,14 @@
 # Formato del disco de A500VP
 
-**Version de formato: 4.** Define el disco, el arranque y el bitstream de
+**Version de formato: 5.** Define el disco, el arranque y el bitstream de
 video y audio.
 
 La version 2 no definia el contenido del audio de los paquetes (viajaba
 vacio). La 3 lo define y usa el byte 28 de la cabecera, antes reservado,
 para el formato del audio. La 4 agrega la paleta por franjas horizontales
 (byte 29 de la cabecera) y cambia el tamano de la paleta de los paquetes.
+La 5 admite 5 bitplanes (32 colores) y agrega el bit 1 de los flags del
+paquete: copiar el buffer visible al oculto antes del delta.
 
 Todo es **big-endian**. El 68000 lee el disco con punteros pelados, sin
 conversiones.
@@ -111,11 +113,11 @@ pasa el bootblock.
 | Offset | Tamano | Contenido |
 |---|---|---|
 | 0 | 4 | `"A5VP"` |
-| 4 | 2 | Version = 4 |
+| 4 | 2 | Version = 5 |
 | 6 | 2 | Flags. Bit 0 = hay audio |
 | 8 | 2 | Ancho logico = 160 |
 | 10 | 2 | Alto logico = 128 |
-| 12 | 1 | Bitplanes (1..4) |
+| 12 | 1 | Bitplanes (1..5) |
 | 13 | 1 | Colores = 2^bitplanes |
 | 14 | 2 | Periodo de Paula del audio (0 = sin audio) |
 | 16 | 2 | Primera fila logica activa (`y0`) |
@@ -140,7 +142,7 @@ viaja en su propio paquete y la sincronia es trivial.
 |---|---|---|
 | 0 | 2 | Longitud total del paquete en bytes, incluido este campo. **Siempre par** |
 | 2 | 1 | Operacion: 0 = DELTA, 1 = REPETICION |
-| 3 | 1 | Flags. Bit 0 = trae paleta |
+| 3 | 1 | Flags. Bit 0 = trae paleta. Bit 1 = copiar el buffer visible al oculto antes del delta |
 | 4 | 2 | Bytes de audio en este paquete |
 | 6 | … | Paleta: `franjas` x `colores` x 2 bytes, RGB444 como `$0RGB`, franja 0 primero (si el bit 0 esta prendido) |
 | … | … | Audio (los bytes indicados en el offset 4) |
@@ -157,6 +159,25 @@ paquete, sin mirar su contenido.
 Un cambio de paleta siempre viaja con un DELTA: una REPETICION nunca trae
 paleta.
 
+### Copia del buffer visible (bit 1 de los flags)
+
+Normalmente el delta se codifica contra el **buffer oculto**, que es el
+penultimo frame distinto que se mostro: con repeticiones de por medio son
+160 ms de movimiento. Si el paquete prende el bit 1, el reproductor copia
+el **area activa** (`y0..y1-1`, todos los planos) del buffer visible al
+oculto **antes** de aplicar el delta, y entonces el delta esta codificado
+contra el ultimo frame distinto, 80 ms atras.
+
+- La copia es un rectangulo, sin desplazamiento: fila `y` a fila `y`. Las
+  filas del letterbox no se tocan (son color 0 en los dos buffers).
+- En la Amiga la hace el Blitter, un blit A → D por plano con `BLTCON0`
+  `$09F0`, y la CPU lo espera con `BBUSY`. Cuesta ~126 ciclos de CPU por
+  plano y por fila activa, medido (ver `DECISIONS.md`).
+- Solo tiene sentido con DELTA. Una REPETICION no toca ningun buffer.
+- La eleccion es **por frame**: el encoder codifica las dos variantes y se
+  queda con la que llega a tiempo y gasta menos bytes. En un corte de
+  escena el buffer visible no predice nada y la copia seria tiempo tirado.
+
 ### Paleta por franjas
 
 El area activa se divide en franjas horizontales de `F` filas logicas (el
@@ -169,7 +190,7 @@ franja 0 (son todas color 0).
 - **El color 0 es el mismo en todas las franjas.** Es tambien el color del
   borde, y el Copper lo escribe una sola vez por frame; el decoder de
   referencia rechaza un paquete que no lo cumpla.
-- **Con 4 bitplanes solo se admite una franja.** El Copper cambia los
+- **Con 4 o 5 bitplanes solo se admite una franja.** El Copper cambia los
   colores 1..n-1 de una franja al principio de su primera linea de
   pantalla, antes de que empiece la imagen: 7 colores entran de sobra, 15
   no (ver `DECISIONS.md`).

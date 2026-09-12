@@ -8,7 +8,7 @@
 #include "a500vp.h"
 
 #define A5V_MAGIC        "A5VP"
-#define A5V_VERSION      4
+#define A5V_VERSION      5
 #define A5V_HEADER_SIZE  32
 
 /* Formato del audio (byte 28 de la cabecera, desde la version 3). */
@@ -34,6 +34,10 @@
 
 /* flags del paquete */
 #define A5V_F_PALETTE    0x01
+/* Copia el area activa del buffer VISIBLE al oculto antes de aplicar el
+ * delta (version 5, H12): asi el delta predice desde el ultimo frame
+ * distinto en vez del penultimo. En la Amiga la hace el Blitter. */
+#define A5V_F_COPY       0x02
 
 /* Presupuesto por defecto: el disquete entero menos el bootblock menos un
  * hueco generoso para el reproductor. Se ajusta cuando el reproductor exista. */

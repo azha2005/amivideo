@@ -610,6 +610,7 @@ int main(int argc, char **argv)
     long total_bytes = 0, maxcycles = 0;
     long total_rows = 0, total_cols = 0;
     int nrepeat = 0, ndelta = 0, npal = 0, bad = 0, maxcyc_frame = 0;
+    int ncopy = 0;
     uint32_t n;
 
     for (i = 1; i < argc; i++) {
@@ -775,8 +776,22 @@ int main(int argc, char **argv)
              * exactamente lo que hace el reproductor escribiendo COP1LC en el
              * vertical blank. */
             A5DeltaStats ds;
-            const uint8_t *q = a5_delta_apply(fb[visible ^ 1], pk, pkend,
-                                              planes, &ds);
+            const uint8_t *q;
+            /* H12: el paquete puede pedir que antes del delta se copie el
+             * area activa del buffer visible al oculto, para predecir desde
+             * el ultimo frame distinto en vez del penultimo. En la Amiga la
+             * copia la hace el Blitter, un blit por plano; aca es el mismo
+             * rectangulo, sin tocar el borde. */
+            if (flags & A5V_F_COPY) {
+                int pi;
+                for (pi = 0; pi < planes; pi++) {
+                    size_t off = ((size_t)pi * A5_H + y0) * A5_ROWBYTES;
+                    memcpy(fb[visible ^ 1] + off, fb[visible] + off,
+                           (size_t)(y1 - y0) * A5_ROWBYTES);
+                }
+                ncopy++;
+            }
+            q = a5_delta_apply(fb[visible ^ 1], pk, pkend, planes, &ds);
             if (!q) die("delta corrupto");
             delta_used = (long)(q - pk);
             visible ^= 1;
@@ -858,6 +873,8 @@ int main(int argc, char **argv)
 
     printf("\npaquetes   : %lu (%d delta, %d repeticion, %d paletas)\n",
            (unsigned long)nframes, ndelta, nrepeat, npal);
+    printf("prediccion : %d deltas copiaron el buffer visible antes (%.1f%%)\n",
+           ncopy, ndelta ? 100.0 * ncopy / ndelta : 0.0);
     printf("filas      : %ld modificadas, %.1f columnas por fila\n",
            total_rows, total_rows ? (double)total_cols / total_rows : 0);
     printf("donde van los bytes:\n");
