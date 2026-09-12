@@ -1117,6 +1117,87 @@ ecuacion, cargar y reproducir no pasa de ahi.
 
 ---
 
+## 2026-09-12 — H10: el decodificador desenrollado, 22 % mas rapido
+
+**Metodo:** el mismo stream (`fmab_op.a5v`, 22 s, 3 planos, franjas, audio
+fib4) en el disco de medicion, antes y despues. WinUAE A500 68000
+cycle-exact, KS 1.2.
+
+**Dos cambios en `apply_delta` (`player/video_code.i`), sin tocar el
+formato:**
+
+1. **Saltar 8 columnas de una** cuando el byte de mascara vale 0, en vez de
+   caminar los 20 bits a ~36 ciclos cada uno. Es el H10 de la hoja de ruta,
+   propuesto por Az.
+2. **Desenrollar la escritura de planos.** El lazo pagaba un `dbf` y un
+   `lea` por plano y por columna marcada (~22 ciclos cada uno). Ahora hay
+   una instancia de macro por cantidad de planos (3 y 4, las unicas que se
+   usan; 1 y 2 siguen con el lazo generico) y el plano se direcciona con el
+   desplazamiento `d16(An)`, que entra de sobra en 16 bits.
+
+**Medido:**
+
+| | antes | despues |
+|---|---|---|
+| Decodificacion media | 38,63 ms | **29,96 ms** (−22 %) |
+| Peor delta | 65,26 ms | **50,54 ms** (−23 %) |
+| Frames tarde | 1, por 2 VBL | 1, por 1 VBL |
+| Ciclos por columna | 177,3 | **126,6** |
+| Ciclos por fila | 877,5 | 900,5 |
+
+**El atajo de columnas casi no sirvio, y conviene decirlo.** El costo por
+fila **subio** de 877,5 a 900,5: en material real las filas marcadas son
+densas, asi que el atajo casi nunca dispara y se pagan los dos `cmp.l` de
+mas. Toda la ganancia vino del desenrollado, que no estaba en la hoja de
+ruta. Se deja igual porque en material mas disperso puede pagar, y cuesta
+24 ciclos por fila.
+
+**Correccion:** el reproductor crecio 504 bytes (3544 → 4048).
+
+**Verificacion byte a byte** con el disco de frame fijo, que compara el
+framebuffer contra el decoder de referencia en C:
+
+| stream | delta | framebuffer |
+|---|---|---|
+| `video.a5v`, 3 planos, frame 182 | 8080 de 8080 | 15 360 identicos |
+| `btf_final.a5v`, 4 planos, frame 100 | 7790 de 7790 | 20 480 identicos |
+| `btf_final.a5v`, 4 planos, frame 300 | 7818 de 7818 | 20 480 identicos |
+
+Que el delta consuma **exactamente** los bytes esperados es lo que prueba
+que el atajo de 8 columnas no se desincroniza con la mascara.
+
+**Modelo de costo recalibrado** (`encoder/stream.h`). Con las constantes
+del Hito 4 el encoder predecia el **123 %** de lo medido, o sea que habria
+degradado frames sin necesidad. Nuevas constantes: `A5_CYC_FRAME` 0,
+`A5_CYC_ROW` 900, `A5_CYC_COL` 19, `A5_CYC_BYTE` 36.
+
+**Primera medicion con 4 planos** (nunca se habia hecho; `btf_final.a5v`,
+13 s, 16 colores):
+
+| | |
+|---|---|
+| Ajuste | `4003 + 795,7 x filas + 168,5 x columnas` (R2 = 0,9954) |
+| Ciclos por columna: modelo 19 + 4 x 36 = 163 | medido **168,5** |
+| Media de 165 deltas | 39,06 ms |
+| Peor delta | 60,22 ms (modelo: 59,68) |
+| Frames tarde | 12 de 324, el peor por 2 VBL |
+
+El reparto entre columna y byte salia de contar instrucciones sobre el caso
+de 3 planos; que con 4 planos de 168,5 contra 163 previstos confirma el
+reparto. El costo por byte literal es 42,2 ciclos con 3 planos y 42,1 con
+4: practicamente el mismo.
+
+Con las dos cantidades de planos el modelo predice el **100 %** de lo
+medido en promedio.
+
+**Bug encontrado midiendo:** la tabla de tiempos se grababa con
+`IOERR_BADLENGTH` (−4). trackdisk exige longitudes multiplo de 512 y
+`TIMING_MAX` habia quedado en 576 (576 x 4 = 2304). Tiene que ser multiplo
+de 128; quedo en 512, que ademas es lo que hace entrar el stream del Hito 6
+ahora que el reproductor es mas grande.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
