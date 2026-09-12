@@ -1250,6 +1250,69 @@ imposible a posible-pero-contraproducente.
 
 ---
 
+## 2026-09-12 — H12 medido en C: el vector de movimiento no sirve, la copia si
+
+**Metodo:** antes de tocar el formato o el ensamblador se midio la ganancia
+en el encoder, con dos opciones nuevas y **experimentales** (`--predict
+visible` y `--motion R`): no producen un stream valido, porque el
+reproductor todavia no hace la copia. Solo sirven para decidir si vale la
+pena escribir el asm.
+
+**La idea tenia dos mitades:**
+
+1. **Predecir desde el buffer visible** en vez del oculto. Hoy el delta va
+   contra el penultimo frame distinto: con `--min-hold 2` son 160 ms de
+   movimiento. Copiando el visible al oculto antes del delta se predice
+   desde 80 ms.
+2. **Correr esa copia (dx,dy)** con un vector global, para seguir un paneo.
+   Era la mitad que la hoja de ruta llamaba "la mas prometedora".
+
+**Medido** (btf, 13 s, 16 colores, `--min-hold 2`, sin perdida):
+
+| | bytes |
+|---|---|
+| Delta contra el oculto (hoy) | 816 590 |
+| **Contra el visible** | **641 448 (−21,4 %)** |
+| Contra el visible + vector (radio 3) | 641 376 (−0,01 % mas) |
+
+**El vector de movimiento no sirve, y conviene decirlo fuerte porque era la
+apuesta.** Setenta y dos bytes en todo el video, y solo 36 de 495 deltas
+eligieron un vector distinto de cero. El motivo mas probable: a 160 px de
+ancho un paneo de camara es casi siempre movimiento sub-pixel, y ademas lo
+que se compara son **indices de paleta**, que no se conservan al correr la
+imagen (el cuantizador elige por pixel). Toda la ganancia esta en la mitad
+trivial.
+
+**Lo que compra esa ganancia: la cadencia completa.** Con el presupuesto
+liberado, `--min-hold 1` (24,96 fps) pasa a entrar:
+
+| btf, 16 colores | bytes | vs. fuente | frames tarde |
+|---|---|---|---|
+| min-hold 2, 13 s (hoy) | 816 590 | 6,61 % | 7 |
+| min-hold 1, 13 s, visible | 858 066 | **2,18 %** | 58, el peor por 4 VBL |
+| min-hold 1, 10 s, visible | 635 084 | **1,47 %** | 32, el peor por 3 VBL |
+
+El error baja **tres veces**, y es justo el error temporal que se habia
+identificado como dominante. Para comparar, el techo absoluto de la maquina
+medido el mismo dia es 1,35 %.
+
+**Lo que falta antes de creerle a estos numeros:** la linea de tiempo del
+encoder **todavia no cuenta el costo de la copia**. En la Amiga la haria el
+Blitter: 15 360 bytes del area activa con 4 planos son ~7 680 palabras, o
+sea ~4,3 ms si el Blitter tuviera todos los slots y mas cerca de 8-9 ms
+compitiendo con 4 bitplanes en lowres. La CPU tiene que esperarla, porque
+el delta escribe en el mismo buffer. Con 40 ms de presupuesto por delta a
+min-hold 1, esos 8 ms importan: hay que medirlos y meterlos en el modelo
+antes de decir que esto es reproducible.
+
+**Consecuencia de diseno:** la copia tiene que ser **opcional por frame**
+(un opcode nuevo, no un cambio global). En un corte de escena predecir
+desde el visible no sirve de nada y la copia seria trabajo tirado; el
+encoder ya simula la linea de tiempo, asi que puede elegir por frame entre
+"delta" y "copia + delta" mirando bytes **y** milisegundos.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
