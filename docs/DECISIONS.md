@@ -1640,6 +1640,60 @@ franjas + snap).
 
 ---
 
+## 2026-09-12 — melissa.mp4: anime que llena la pantalla, y un bug del control de tasa
+
+**Pedido de Az:** probar 32 colores con `melissa.mp4`, que es anime pero le
+costaba con el metodo anterior.
+
+**Por que le cuesta, y no es el anime:** la fuente es **4:3** (960x720,
+23,976 fps). Con letterbox quedan **120 filas logicas activas** contra las
+94 de `btf.mp4`, que es 16:9. Son **28 % mas de imagen por frame**, en bytes
+y en milisegundos, antes de tocar un solo parametro. El material es facil
+(el error de cuantizacion con 32 colores es 0,0204, mejor que el 0,0212 de
+btf); lo caro es que usa toda la pantalla.
+
+**Medido** (presupuesto real del disco, `--predict auto`):
+
+| | error vs. fuente | peor delta | frames tarde | disco libre |
+|---|---|---|---|---|
+| 8 colores, franjas, 13 s *(el metodo anterior)* | 7,42 % | 67,0 ms | 3 | 324 KB |
+| **16 colores, 13 s** | **4,84 %** | 74,9 ms | 7 | 98 KB |
+| 32 colores, 11 s | **3,92 %** | 95,4 ms | **28, el peor por 4 VBL** | 53 KB |
+| **32 colores, `--min-hold 3`, 13 s** | **6,30 %** | 100,7 ms | 3 | 85 KB |
+| 16 colores, `--min-hold 3`, 16 s | 7,62 % | 75,0 ms | 3 | 113 KB |
+| 32 colores, 13 s | 20,14 % | — | — | 19 KB |
+| 16 colores, 16 s | 16,07 % | — | — | 9 KB |
+
+**La lectura honesta:** con 120 filas activas, 32 colores **no entran a 13 s
+con la cadencia de siempre**. Las dos salidas buenas son 16 colores a 13 s
+(4,84 %, tiempos holgados) o 32 colores bajando a `--min-hold 3` (6,30 %,
+8,3 imagenes por segundo). La fila de 3,92 % es la mejor del cuadro y
+**igual no se recomienda**: 28 frames tarde, el peor por 4 VBL, es
+tartamudeo visible. El peor delta, 95,4 ms, se pasa de los 80 que da
+`--min-hold 2`.
+
+**Bug encontrado midiendo: el control de tasa dejaba disco sin usar.** Con
+32 colores a 10 s daba 9,31 % de error **sobrando 105 KB de disco**, peor
+que el mismo video a 11 s. La causa: la busqueda binaria sobre el umbral de
+perdida asume que **mas umbral = menos bytes**, y eso no es cierto — una
+repeticion de mas o de menos cambia el buffer oculto de todo lo que sigue.
+Cuando un umbral intermedio no entraba, la busqueda descartaba para siempre
+todo lo que estaba por debajo, aunque ahi hubiera streams que entraban.
+
+**Arreglo:** la busqueda sigue siendo binaria, pero ya no devuelve "el
+umbral mas bajo que entro" sino **el mejor stream que entro**, comparando el
+error que cada uno midio (`rc_try` en `encode.c`). No cuesta ni una
+codificacion mas: son los mismos streams, mejor elegidos.
+
+| melissa, 32 colores, 10 s | error vs. fuente |
+|---|---|
+| antes | 9,31 % |
+| **despues** | **5,87 %** |
+
+Sin cambios en btf (5,89 % antes y despues): ahi la busqueda ya caia bien.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

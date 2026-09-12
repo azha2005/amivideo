@@ -630,6 +630,57 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
 
 /* ------------------------------------------------------------------ */
 
+/* --- control de tasa -----------------------------------------------------
+ * Codifica con un umbral de perdida y se queda con el resultado si entra en
+ * el presupuesto y ademas es mejor que el que ya tenia. Guardar el mejor
+ * medido, en vez del umbral mas chico que entro, es lo que hace que la
+ * busqueda binaria no se pierda cuando el umbral no es monotono en bytes.
+ * Si no entra ninguno, conserva el mas chico. */
+typedef struct {
+    const uint8_t *idx;
+    size_t         nframes;
+    const Scene   *scenes;
+    int            nscenes, planes, ncolors, y0, y1;
+    double         repeat_boost;
+    long           cyc_limit;
+    int            min_hold, max_late;
+    const A5Audio *au;
+    long           budget;
+
+    A5Stream best;          /* el elegido hasta ahora */
+    int       have, fits;
+    double    bestthr;
+    size_t    besttotal;
+} RateCtl;
+
+static size_t rc_try(RateCtl *rc, double thr)
+{
+    A5Stream s;
+    size_t total;
+    int fits, better;
+
+    build_stream(&s, rc->idx, rc->nframes, rc->scenes, rc->nscenes,
+                 rc->planes, rc->ncolors, rc->y0, rc->y1, thr,
+                 rc->repeat_boost, rc->cyc_limit, rc->min_hold, rc->max_late,
+                 rc->au, NULL);
+    total = A5V_HEADER_SIZE + s.buf.len;
+    fits = rc->budget <= 0 || total <= (size_t)rc->budget;
+
+    if (!rc->have)            better = 1;
+    else if (fits && !rc->fits) better = 1;          /* entrar manda */
+    else if (fits)            better = s.err_sum < rc->best.err_sum;
+    else                      better = !rc->fits && total < rc->besttotal;
+
+    if (better) {
+        if (rc->have) { a5buf_free(&rc->best.buf); free(rc->best.crc); }
+        rc->best = s; rc->have = 1; rc->fits = fits;
+        rc->bestthr = thr; rc->besttotal = total;
+    } else {
+        a5buf_free(&s.buf); free(s.crc);
+    }
+    return total;
+}
+
 static void usage(void)
 {
     printf(
@@ -1285,18 +1336,31 @@ int main(int argc, char **argv)
 
     /* --- bitstream y control de tasa ---------------------------------
      * Se codifica entero con una calidad dada y se mide. Si no entra en el
-     * presupuesto, se sube la perdida y se vuelve a codificar. Busqueda
-     * binaria sobre el umbral, que es monotono: mas umbral, menos bytes. */
+     * presupuesto, se sube la perdida y se vuelve a codificar; si entra y
+     * sobra disco, se baja.
+     *
+     * La busqueda es binaria sobre el umbral, pero el umbral NO es monotono
+     * en bytes: una repeticion de mas o de menos cambia el buffer oculto de
+     * todo lo que sigue. Por eso no se devuelve "el umbral mas bajo que
+     * entro" sino **el mejor stream que entro**, comparando el error que
+     * cada uno midio. Asumir la monotonia dejaba hasta un 12 %% del disco
+     * sin usar con mas perdida de la necesaria (medido con melissa.mp4 a 32
+     * colores, 2026-09-12). */
     {
         A5Stream st;
         double lo = quality * 0.0015, hi = lo, qthr = lo;
         size_t total;
         int pass = 0;
+        RateCtl rc;
 
-        build_stream(&st, idx, nframes, scenes, nscenes, planes, ncolors,
-                     y0, y1, lo, repeat_boost, cyc_limit, min_hold, max_late,
-                     &au, NULL);
-        total = A5V_HEADER_SIZE + st.buf.len;
+        memset(&rc, 0, sizeof rc);
+        rc.idx = idx; rc.nframes = nframes; rc.scenes = scenes;
+        rc.nscenes = nscenes; rc.planes = planes; rc.ncolors = ncolors;
+        rc.y0 = y0; rc.y1 = y1; rc.repeat_boost = repeat_boost;
+        rc.cyc_limit = cyc_limit; rc.min_hold = min_hold;
+        rc.max_late = max_late; rc.au = &au; rc.budget = budget;
+
+        total = rc_try(&rc, lo);
         printf("\nbitstream  : calidad %.4f -> %lu bytes\n", lo,
                (unsigned long)total);
 
@@ -1304,71 +1368,40 @@ int main(int argc, char **argv)
             hi = lo > 0 ? lo : 0.01;
             do {
                 hi *= 2;
-                a5buf_free(&st.buf); free(st.crc);
-                build_stream(&st, idx, nframes, scenes, nscenes, planes,
-                             ncolors, y0, y1, hi, repeat_boost, cyc_limit,
-                             min_hold, max_late, &au, NULL);
-                total = A5V_HEADER_SIZE + st.buf.len;
+                total = rc_try(&rc, hi);
                 printf("             calidad %.4f -> %lu bytes\n", hi,
                        (unsigned long)total);
             } while (total > (size_t)budget && hi < 1.0 && ++pass < 12);
 
             for (pass = 0; pass < 10 && hi - lo > 0.0005; pass++) {
                 double mid = (lo + hi) / 2;
-                A5Stream t2;
-                build_stream(&t2, idx, nframes, scenes, nscenes, planes,
-                             ncolors, y0, y1, mid, repeat_boost, cyc_limit,
-                             min_hold, max_late, &au, NULL);
-                if (A5V_HEADER_SIZE + t2.buf.len <= (size_t)budget) {
-                    a5buf_free(&st.buf); free(st.crc);
-                    st = t2; hi = mid; total = A5V_HEADER_SIZE + st.buf.len;
-                } else {
-                    a5buf_free(&t2.buf); free(t2.crc);
-                    lo = mid;
-                }
+                if (rc_try(&rc, mid) <= (size_t)budget) hi = mid;
+                else                                    lo = mid;
             }
-            printf("             ajustado a %.4f -> %lu bytes\n", hi,
-                   (unsigned long)total);
-            qthr = hi;
+            printf("             ajustado a %.4f -> %lu bytes\n",
+                   rc.bestthr, (unsigned long)rc.besttotal);
         } else if (budget > 0 && lo > 0) {
-            /* Entra y sobra disco: se baja la perdida para usarlo. Entre 0
-             * (a) y la calidad pedida (b, que entra). Mas umbral no da
-             * siempre menos bytes (una repeticion de mas cambia el buffer
-             * oculto de todo lo que sigue), pero la busqueda solo se queda
-             * con streams que entran. */
-            A5Stream t2;
+            /* Entra y sobra disco: se baja la perdida para usarlo. */
             double a = 0, b = lo;
-            size_t t;
 
-            build_stream(&t2, idx, nframes, scenes, nscenes, planes, ncolors,
-                         y0, y1, 0.0, repeat_boost, cyc_limit, min_hold,
-                         max_late, &au, NULL);
-            t = A5V_HEADER_SIZE + t2.buf.len;
-            if (t <= (size_t)budget) {
-                a5buf_free(&st.buf); free(st.crc);
-                st = t2; b = 0; total = t;
-            } else {
-                a5buf_free(&t2.buf); free(t2.crc);
+            if (rc_try(&rc, 0.0) > (size_t)budget) {
                 for (pass = 0; pass < 8 && b - a > 0.0005; pass++) {
                     double mid = (a + b) / 2;
-                    build_stream(&t2, idx, nframes, scenes, nscenes, planes,
-                                 ncolors, y0, y1, mid, repeat_boost,
-                                 cyc_limit, min_hold, max_late, &au, NULL);
-                    t = A5V_HEADER_SIZE + t2.buf.len;
-                    if (t <= (size_t)budget) {
-                        a5buf_free(&st.buf); free(st.crc);
-                        st = t2; b = mid; total = t;
-                    } else {
-                        a5buf_free(&t2.buf); free(t2.crc);
-                        a = mid;
-                    }
+                    if (rc_try(&rc, mid) <= (size_t)budget) b = mid;
+                    else                                    a = mid;
                 }
             }
-            if (b < lo)
+            if (rc.bestthr < lo)
                 printf("             sobraba disco: bajado a %.4f -> %lu "
-                       "bytes\n", b, (unsigned long)total);
-            qthr = b;
+                       "bytes\n", rc.bestthr,
+                       (unsigned long)rc.besttotal);
         }
+        st = rc.best;
+        qthr = rc.bestthr;
+        total = rc.besttotal;
+        if (!rc.fits && budget > 0)
+            printf("             AVISO: ningun umbral entro en el "
+                   "presupuesto\n");
 
         /* Calidad contra la fuente del stream elegido: se lo arma una vez
          * mas (sale identico) midiendo lo que se ve contra el original. */
