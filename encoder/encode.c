@@ -285,6 +285,67 @@ static void src_account(A5Stream *st, const uint8_t *vis,
     }
 }
 
+/* --- H12: prediccion con compensacion de movimiento (experimento) --------
+ * Hoy el delta va contra el buffer oculto, que es el penultimo frame
+ * distinto: con --min-hold 2 son 160 ms de movimiento. Dos alternativas:
+ *
+ *   --predict visible  copiar el buffer VISIBLE al oculto antes del delta,
+ *                      o sea predecir desde 80 ms atras en vez de 160;
+ *   --motion R         ademas correr esa copia (dx,dy), buscando el mejor
+ *                      vector global en un radio R, para seguir un paneo.
+ *
+ * En la Amiga esa copia la haria el Blitter, que tiene barrel shifter. Aca
+ * solo se mide cuanto ahorraria: si no ahorra, no se escribe el asm.
+ *
+ * La copia cubre solo el rectangulo que se solapa; la franja que queda al
+ * descubierto conserva lo que tenia el oculto y la arregla el delta. Es lo
+ * que el Blitter hace natural (un solo rectangulo, sin rellenos). */
+static int  g_predict_vis = 0, g_motion_radius = 0;
+static long g_nmotion = 0, g_npredict = 0;
+
+static void predict_shift(uint8_t *pred, const uint8_t *hid,
+                          const uint8_t *vis, int dx, int dy, int y0, int y1)
+{
+    int y;
+
+    memcpy(pred, hid, (size_t)A5_W * A5_H);
+    for (y = y0; y < y1; y++) {
+        int sy = y - dy, x, xa, xb;
+        if (sy < y0 || sy >= y1) continue;
+        xa = dx > 0 ? dx : 0;
+        xb = dx > 0 ? A5_W : A5_W + dx;
+        for (x = xa; x < xb; x++)
+            pred[(size_t)y * A5_W + x] = vis[(size_t)sy * A5_W + x - dx];
+    }
+}
+
+/* El (dx,dy) que deja mas pixeles ya iguales al frame ideal. Contar pixeles
+ * iguales es buen proxy de los bytes del delta, y ademas penaliza solo los
+ * vectores grandes, que dejan menos solapamiento. */
+static void motion_search(const uint8_t *vis, const uint8_t *ideal, int radius,
+                          int y0, int y1, int *bdx, int *bdy)
+{
+    int dx, dy;
+    long best = -1;
+
+    *bdx = 0; *bdy = 0;
+    for (dy = -radius; dy <= radius; dy++)
+        for (dx = -radius; dx <= radius; dx++) {
+            long same = 0;
+            int y;
+            for (y = y0; y < y1; y++) {
+                int sy = y - dy, x, xa, xb;
+                if (sy < y0 || sy >= y1) continue;
+                xa = dx > 0 ? dx : 0;
+                xb = dx > 0 ? A5_W : A5_W + dx;
+                for (x = xa; x < xb; x++)
+                    if (vis[(size_t)sy * A5_W + x - dx] ==
+                        ideal[(size_t)y * A5_W + x]) same++;
+            }
+            if (same > best) { best = same; *bdx = dx; *bdy = dy; }
+        }
+}
+
 /* Calidad con perdida: se deja sin actualizar todo pixel cuyo error, medido
  * contra el estado YA DECODIFICADO, quede por debajo del umbral. Despues, si
  * lo que queda de una fila es despreciable, se descarta la fila entera para
@@ -395,6 +456,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
     uint8_t *vis = calloc(fsz, 1);
     uint8_t *hid = calloc(fsz, 1);
     uint8_t *tgt = malloc(fsz);
+    uint8_t *pred = malloc(fsz);
     A5Buf video;
     size_t n;
     int s = 0;
@@ -408,7 +470,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
     double fillp = afmt ? 2.0 * A5_AUD_BUF_SAMPLES * au->period : 1.0;
     double fillc = (double)a5_audio_fill_cost(afmt);
 
-    if (!vis || !hid || !tgt) die("sin memoria");
+    if (!vis || !hid || !tgt || !pred) die("sin memoria");
     memset(st, 0, sizeof *st);
     a5buf_init(&st->buf);
     a5buf_init(&video);
@@ -420,6 +482,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         const uint8_t *ideal = idx + n * fsz;
         int newscene;
         A5DeltaStats ds = {0, 0, 0, 0};
+        const uint8_t *base;
         double thr = pixel_thr;
         double due = 2.0 * (double)n * P;    /* VBL en que se ve este frame */
         int attempt, late = 0;
@@ -476,12 +539,24 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
          * siguen absorben el atraso. Se degrada (subiendo el umbral) solo si
          * se pasaria de max_late VBL: un frame degradado deja salpicado, que
          * se ve bastante peor que un frame que llega 20 o 40 ms tarde. */
+        /* H12: de donde se predice este delta. */
+        base = hid;
+        if (g_predict_vis) {
+            int dx = 0, dy = 0;
+            if (g_motion_radius > 0)
+                motion_search(vis, ideal, g_motion_radius, y0, y1, &dx, &dy);
+            predict_shift(pred, hid, vis, dx, dy, y0, y1);
+            base = pred;
+            g_npredict++;
+            if (dx || dy) g_nmotion++;
+        }
+
         for (attempt = 0; attempt < 6; attempt++) {
             int capped;
             memcpy(tgt, ideal, fsz);
-            apply_quality(tgt, hid, pal, y0, y1, thr, thr);
+            apply_quality(tgt, base, pal, y0, y1, thr, thr);
             video.len = 0;
-            a5_delta_encode(&video, hid, tgt, planes, &ds);
+            a5_delta_encode(&video, base, tgt, planes, &ds);
             late = late_vbls(t_free, ds.cycles, due, P, fillp, fillc);
             capped = !cyc_limit || ds.cycles <= cyc_limit;
             if (capped && late <= max_late) break;
@@ -550,7 +625,18 @@ static void usage(void)
 "                          cercano y su frecuencia exacta (8006,5)\n"
 "  --audio-period N        periodo de Paula, en lugar de --audio-rate (443)\n"
 "  --audio-gain F          ganancia antes de pasar a 8 bits (1.0)\n"
-"  --repeat-boost F        cuanto mas permisivo es repetir que actualizar (1.5)\n"
+"  --repeat-boost F        cuanto mas permisivo es repetir que actualizar (1.5)\n");
+    /* Partido en dos: un solo literal pasaba los 4095 caracteres que C99
+     * obliga a soportar, y -pedantic avisa. */
+    printf(
+"  --predict MODO          contra que se codifica el delta: hidden (el\n"
+"                          penultimo frame distinto, como siempre) o visible\n"
+"                          (el ultimo; el reproductor tendria que copiarlo\n"
+"                          con el Blitter). EXPERIMENTAL: el formato y el\n"
+"                          reproductor todavia no lo soportan\n"
+"  --motion R              con --predict visible, ademas corre la copia\n"
+"                          buscando el mejor vector global en un radio R\n"
+"                          (0 = sin movimiento). EXPERIMENTAL\n"
 "  --stability F           histeresis temporal del cuantizador (0.07)\n"
 "  --max-late N            VBL de atraso que se toleran antes de degradar\n"
 "                          un frame (2); el atraso se simula con el modelo\n"
@@ -689,6 +775,13 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(a, "--band-overlap") && has)  band_overlap = atoi(argv[++i]);
         else if (!strcmp(a, "--band-snap") && has)     band_snap = atof(argv[++i]);
+        else if (!strcmp(a, "--motion") && has)  g_motion_radius = atoi(argv[++i]);
+        else if (!strcmp(a, "--predict") && has) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "hidden"))       g_predict_vis = 0;
+            else if (!strcmp(v, "visible")) g_predict_vis = 1;
+            else die("--predict: hidden o visible");
+        }
         else if (!strcmp(a, "--aspect") && has) {
             const char *v = argv[++i];
             if (!strcmp(v, "letterbox"))    aspect = ASPECT_LETTERBOX;
@@ -1357,6 +1450,11 @@ int main(int argc, char **argv)
         if (st.over_budget)
             printf("  AVISO: %d frames pasan el tope fijo de %.0f ms\n",
                    st.over_budget, frame_ms);
+        if (g_predict_vis)
+            printf("prediccion : desde el buffer visible en %ld deltas; %ld "
+                   "con vector (radio %d)\n  AVISO: experimental, el "
+                   "reproductor todavia no hace esta copia\n",
+                   g_npredict, g_nmotion, g_motion_radius);
         printf("error final: %.4f (contra el frame cuantizado ideal)\n",
                st.err_sum / nframes);
         printf("salpicado  : %.2f%% de los pixeles activos con error "
