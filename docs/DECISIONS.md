@@ -1549,6 +1549,97 @@ medido el 2026-09-11 daba 39 KB/s con 8 colores contra 63 KB/s de btf con
 
 ---
 
+## 2026-09-12 — Mas colores sin mas planos: franjas parciales con el Copper
+
+**Pregunta de Az:** medilo hipoteticamente y mostrame como se veria.
+
+### Cuantos MOVE entran (aritmetica, no medicion)
+
+La ventana del Copper para cambiar colores esta **antes de DDFSTRT**, y por
+eso **no la achican los planos**: con 5 planos el DMA de bitplanes usa 6 de
+cada 8 slots, pero solo desde el color clock 56 en adelante.
+
+| | color clocks |
+|---|---|
+| Linea PAL | 227 |
+| Hasta DDFSTRT ($38 = 56) | 56 |
+| − refresco de memoria (4 slots) | −4 |
+| − audio, 2 canales | −2 |
+| − el WAIT de la franja | −6 |
+| − los 2 MOVE del doblado vertical (BPL1MOD/BPL2MOD) | −8 |
+| **Queda** | **36** |
+
+Un MOVE del Copper son 2 palabras y el Copper accede a memoria un ciclo de
+cada dos: **4 color clocks por MOVE**. 36 / 4 = **9 MOVE**. El disco y los
+sprites estan apagados, asi que sus 3 y 16 slots quedan libres.
+
+Coincide con lo medido en el Hito 6, que es el unico ancla real: con 3
+planos **7 colores entran de sobra y 15 no**. Conclusion hipotetica: **6
+seguros, 8 optimistas**. Antes de implementarlo hay que medirlo con la
+misma prueba de temporizacion que decidio las franjas.
+
+### Cuanto se ganaria (simulado, `encoder/bandtest.c`)
+
+Franja 0 con su paleta completa (la escribe el delta, hay vertical blank de
+sobra) y cada franja siguiente hereda la anterior y cambia K colores. La
+busqueda prueba las 31x31 combinaciones (entrada, color candidato) y se
+queda con la que mas baja el error; el color 0 nunca se toca, porque es el
+borde. Frames de btf, 160x96 logicos, 6 franjas de 16 filas:
+
+| | t = 2 s | t = 9 s |
+|---|---|---|
+| 16 colores | 0,0297 | 0,0278 |
+| **32 colores, una paleta (hoy)** | **0,0230** | **0,0217** |
+| 64 EHB (6 planos) | 0,0209 | 0,0209 |
+| 32 + franjas de 4 colores | 0,0208 | 0,0203 |
+| 32 + franjas de 6 colores | 0,0195 | 0,0194 |
+| **32 + franjas de 8 colores** | **0,0190** | **0,0186** |
+| 32 + paleta entera por franja (no entra) | 0,0193 | 0,0184 |
+| 64 libres (no existen en OCS) | 0,0184 | 0,0189 |
+
+**Ocho colores por franja llegan al techo de la paleta entera por franja**,
+le ganan a los 64 de EHB y empatan con 64 colores libres, que en OCS no
+existen. Y a diferencia de EHB **no cuesta ni un byte de bitstream ni un
+ciclo de decodificacion**: son 8 MOVE del Copper por franja.
+
+Franjas mas finas dan mas (t = 9 s, 8 colores por franja): 8 filas 0,0179;
+16 filas 0,0186; 32 filas 0,0199. Az ya eligio 16 filas en el Hito 6
+mirando las costuras, asi que la tabla usa 16.
+
+### El artefacto que encontro el preview, y su arreglo
+
+Con las franjas, la pantalla del autocine (una zona lisa grande y clara) se
+va a **rosa**. No es la busqueda: pasa igual con la paleta entera por
+franja, o sea es **el cuantizador por franja**. Cuantizada sola, la franja
+le da a esa zona un centroide distinto que el del frame entero, y el error
+medio no lo castiga (muchos pixeles apenas corridos) pero el ojo lo ve
+enseguida. Es el mismo trampa que el banding, al reves.
+
+El encoder ya tiene el arreglo para las franjas de 3 planos: `--band-snap`
+(un color a menos de F de uno de la paleta de referencia se vuelve ese
+mismo). Con 0,04, lo medido:
+
+| | t = 2 s | t = 9 s |
+|---|---|---|
+| una paleta (hoy) | 0,0230 | 0,0217 |
+| 8 colores por franja, sin snap | 0,0190 | 0,0186 |
+| **8 colores por franja, snap 0,04** | **0,0205** | **0,0198** |
+
+El snap **cuesta un tercio de la ganancia y saca el rosa**: queda −11 % y
+−9 % contra la paleta unica, todavia a la altura de EHB y sin el sexto
+plano. Las imagenes estan en `workand_snap_t9.png` (hoy / franjas /
+franjas + snap).
+
+### Lo que esta simulacion NO dice
+
+- Es por frame. En el formato la paleta viaja con el delta y cambia **por
+  escena**, no por frame: la ganancia real va a ser algo menor.
+- No simula costuras en movimiento, que es lo que hizo elegir franjas de 16
+  filas en el Hito 6.
+- Los 9 MOVE son aritmetica de slots, no una medicion en la maquina.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
