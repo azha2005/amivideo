@@ -175,6 +175,7 @@ typedef struct {
     int  rows;        /* filas logicas modificadas */
     int  cols;        /* columnas (byte logico x todos los planos) escritas */
     int  bytes;       /* bytes literales escritos = cols * planos */
+    int  same;        /* de esos, los que escriben lo que ya estaba */
     long cycles;      /* costo estimado de decodificacion */
 } A5DeltaStats;
 

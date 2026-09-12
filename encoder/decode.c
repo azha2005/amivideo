@@ -647,6 +647,7 @@ int main(int argc, char **argv)
     long total_bytes = 0, maxcycles = 0;
     long total_rows = 0, total_cols = 0;
     int nrepeat = 0, ndelta = 0, npal = 0, bad = 0, maxcyc_frame = 0;
+    long total_same = 0;               /* bytes que no cambian nada */
     int ncopy = 0;
     uint32_t n;
 
@@ -849,6 +850,7 @@ int main(int argc, char **argv)
             visible ^= 1;
             ndelta++;
             total_bytes += ds.bytes;
+            total_same += ds.same;
             total_rows += ds.rows;
             total_cols += ds.cols;
             if (adf && n < MEAS_TIMING_MAX) {
@@ -942,6 +944,13 @@ int main(int argc, char **argv)
            100.0 * total_rows * A5_COLMASK_SIZE / len);
     printf("  datos literales      %8ld  (%4.1f%%)\n",
            total_bytes, 100.0 * total_bytes / len);
+    /* De cada columna se escriben TODOS los planos, cambien o no. Cuantos
+     * no cambiaban dice cuanto se ahorraria una mascara de planos. */
+    printf("     de esos, %ld (%.1f%%) escriben lo que ya estaba: %.2f de "
+           "%d planos cambian por columna\n",
+           total_same, 100.0 * total_same / (total_bytes ? total_bytes : 1),
+           total_cols ? (double)(total_bytes - total_same) / total_cols : 0.0,
+           planes);
     printf("costo est. : peor frame %ld ciclos = %.1f ms (frame %d)\n",
            maxcycles, maxcycles * 1000.0 / A5_CPU_HZ, maxcyc_frame);
     if (p != end)

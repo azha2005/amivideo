@@ -189,8 +189,11 @@ const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
         for (b = 0; b < A5_ROWBYTES; b++) {
             if (!(colmask[b >> 3] & (0x80 >> (b & 7)))) continue;
             if (end - data < planes) return NULL;
-            for (p = 0; p < planes; p++)
-                fb[((size_t)p * A5_H + y) * A5_ROWBYTES + b] = *data++;
+            for (p = 0; p < planes; p++) {
+                uint8_t *dst = &fb[((size_t)p * A5_H + y) * A5_ROWBYTES + b];
+                if (*dst == *data) st->same++;   /* el plano no cambio */
+                *dst = *data++;
+            }
             st->cols++;
             st->bytes += planes;
         }

@@ -1781,6 +1781,94 @@ mas colores de los que entran, en vez de truncar en silencio.
 
 ---
 
+## 2026-09-12 — Como ganar duracion: la ecuacion, y dos caminos cerrados
+
+**Pregunta de Az:** hipoteticamente, como se gana mas tiempo de
+reproduccion.
+
+### La ecuacion
+
+Hoy el reproductor carga todo antes de empezar, asi que la duracion es
+`min(disco, RAM) / tasa`. Con 883 KB de disco, ~885 KB de RAM util (975 KB
+libres menos 82 KB de framebuffers, copper lists, buffers de audio, rebote
+y margen con 5 planos) y 61 KB/s, son **14,5 s**.
+
+**Disco y RAM son casi iguales, y por eso hoy el streaming no daria nada.**
+Si el reproductor leyera mientras reproduce, el limite pasa a ser que el
+buffer no se vacie:
+
+```
+T = RAM / (tasa - lectura)          (con tasa > lectura)
+```
+
+Y ahi cada KB/s importa muchisimo, porque la resta esta en el
+denominador. Tasas medidas sin perdida, 13 s, `--predict auto`, franjas de
+8 filas:
+
+| | tasa total |
+|---|---|
+| btf, 32 colores, `--min-hold 2` | 61,2 KB/s |
+| btf, 32 colores, `--min-hold 3` | 50,8 KB/s |
+| btf, 16 colores, `--min-hold 2` | 48,9 KB/s |
+| melissa, 32 colores, `--min-hold 3` | 54,5 KB/s |
+
+Duracion que sale de la ecuacion, con 885 KB de RAM:
+
+| tasa | lectura 18 KB/s (trackdisk) | lectura 27 KB/s (trackloader propio) |
+|---|---|---|
+| 61 KB/s (32 colores, min-hold 2) | 20,6 s | **26,0 s** |
+| 51 KB/s (32 colores, min-hold 3) | 26,8 s | **36,9 s** |
+| 49 KB/s (16 colores) | 28,5 s | **40,2 s** |
+| 40 KB/s (anime tranquilo) | 40,2 s | **68,1 s** |
+
+Contra los 14,5 s de hoy. **El multiplicador mas grande no es el disco: es
+la velocidad de lectura**, porque entra restando.
+
+### Lo que hace falta para eso, en orden de rendimiento
+
+1. **Trackloader propio con decodificacion MFM por Blitter (H13).** La
+   lectura medida de trackdisk es 18,0 KB/s contra un techo fisico de
+   28,2 KB/s (11 sectores x 512 x 5 vueltas/s): trackdisk deja el 36 % en
+   el camino, y ademas decodifica MFM con la CPU, que es justo lo que no
+   sobra. Con el Blitter la decodificacion de una pista (5632 bytes) cuesta
+   unos pocos ms cada 200 ms: ~5 % de la maquina. **Sin esto el streaming
+   no es viable**, no por los bytes sino por la CPU.
+2. **Streaming mientras reproduce.** Sin el, la RAM es el techo y el disco
+   mas grande no sirve de nada.
+3. **Formato de pista propio (H8, Greaseweazle).** 12 sectores por pista
+   son 964 KB (+9 %) y 13 son 1044 KB (+18 %), y ademas suben el techo
+   fisico de lectura a 30,7 KB/s. Solo rinde junto con el streaming: sin
+   el, la RAM tapa la ganancia.
+4. **Multidisco.** Con streaming, el disco deja de ser el limite y la
+   formula manda. **Ojo con el cambio de disco:** mientras el usuario
+   cambia, no se lee, asi que hace falta buffer = tasa x segundos de
+   cambio. A 61 KB/s, 10 segundos de cambio son 610 KB, el 70 % de la RAM.
+   A 40 KB/s son 400 KB y entra comodo. **El multidisco solo funciona a
+   tasas bajas.**
+
+### Dos caminos cerrados, medidos
+
+**1. Mascara de planos por columna: no sirve.** Hoy cada columna marcada
+escribe todos los planos, cambien o no. Medido sobre btf con 5 planos:
+**cambian 4,02 de 5** (el 19,7 % de los bytes literales escriben lo que ya
+estaba). Una mascara de planos costaria 1 byte por columna para ahorrar
+0,98: empate exacto. Con 3 planos cambian 2,28 de 3, mismo resultado. El
+decoder de referencia ahora reporta esta cifra.
+
+**2. Comprimir los literales: no hay CPU.** El 87 % del stream son bytes
+literales de planos (la mascara de columnas es 5,1 %, el mapa de filas
+0,3 %, las cabeceras 0,2 %, las paletas 0,4 %). Comprimirlos de verdad pide
+entropia, y el peor delta ya esta en 83,6 ms de los 80 que hay. No hay
+margen.
+
+**Y uno barato que si sirve: menos filas activas.** Los bytes son
+proporcionales a las filas activas. btf (16:9) usa 94 de 128; melissa (4:3)
+usa 120, y por eso cuesta 28 % mas. Un recorte a 2,35:1 dejaria 68 filas:
+**-28 % de tasa, +38 % de duracion**, gratis y sin tocar una linea de
+codigo. Es una decision de encuadre, no de ingenieria.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

@@ -538,8 +538,8 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
     uint8_t *hid = calloc(fsz, 1);
     uint8_t *tgt = malloc(fsz);
     uint8_t *pred = malloc(fsz);
-    Cand ca = {{0, 0, 0}, NULL, {0, 0, 0, 0}, 0, 0, 0, 0};
-    Cand cb = {{0, 0, 0}, NULL, {0, 0, 0, 0}, 0, 0, 0, 1};
+    Cand ca = {{0, 0, 0}, NULL, {0, 0, 0, 0, 0}, 0, 0, 0, 0};
+    Cand cb = {{0, 0, 0}, NULL, {0, 0, 0, 0, 0}, 0, 0, 0, 1};
     /* Lo que cuesta la copia con el Blitter: un blit por plano sobre las
      * filas activas, con la CPU esperandolo (medido, ver stream.h). */
     long copy_cyc = a5_cyc_blit(planes) * planes * (y1 - y0);
