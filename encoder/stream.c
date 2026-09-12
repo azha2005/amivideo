@@ -87,17 +87,22 @@ void a5_depack_row(const uint8_t *planar, int planes, uint8_t *idx_row)
 
 /* --- delta --------------------------------------------------------------- */
 
+long a5_cyc_byte(int planes)
+{
+    return planes >= 5 ? A5_CYC_BYTE_5PL : A5_CYC_BYTE;
+}
+
 long a5_cyc_blit(int planes)
 {
     return planes >= 5 ? A5_CYC_BLIT_5PL : A5_CYC_BLIT;
 }
 
-long a5_delta_cost(const A5DeltaStats *st)
+long a5_delta_cost(const A5DeltaStats *st, int planes)
 {
     return A5_CYC_FRAME
          + (long)st->rows  * A5_CYC_ROW
          + (long)st->cols  * A5_CYC_COL
-         + (long)st->bytes * A5_CYC_BYTE;
+         + (long)st->bytes * a5_cyc_byte(planes);
 }
 
 int a5_delta_encode(A5Buf *out, const uint8_t *hidden, const uint8_t *target,
@@ -153,7 +158,7 @@ int a5_delta_encode(A5Buf *out, const uint8_t *hidden, const uint8_t *target,
     }
 
     memcpy(out->p + mark, rowmask, sizeof rowmask);
-    st->cycles = a5_delta_cost(st);
+    st->cycles = a5_delta_cost(st, planes);
     return st->rows > 0;
 }
 
@@ -190,7 +195,7 @@ const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
             st->bytes += planes;
         }
     }
-    st->cycles = a5_delta_cost(st);
+    st->cycles = a5_delta_cost(st, planes);
     return data;
 }
 

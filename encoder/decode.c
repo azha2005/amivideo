@@ -321,7 +321,7 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
         if (pt[i].cycles > maxm) { maxm = pt[i].cycles; maxn = i; }
         s.rows = pt[i].rows; s.cols = pt[i].cols; s.bytes = pt[i].bytes;
         s.cycles = 0;
-        ratio += (a5_delta_cost(&s) + fills[i] * fillc) / pt[i].cycles;
+        ratio += (a5_delta_cost(&s, planes) + fills[i] * fillc) / pt[i].cycles;
     }
     mean = sum / np;
     ymean = ysum / np;
@@ -343,7 +343,7 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
         A5DeltaStats s;
         s.rows = pt[maxn].rows; s.cols = pt[maxn].cols;
         s.bytes = pt[maxn].bytes; s.cycles = 0;
-        worst_model = (double)a5_delta_cost(&s) + fills[maxn] * fillc;
+        worst_model = (double)a5_delta_cost(&s, planes) + fills[maxn] * fillc;
     }
 
     printf("decodif.   : %d deltas medidos, media %.2f ms, peor %.2f ms "

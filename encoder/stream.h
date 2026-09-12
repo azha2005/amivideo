@@ -62,16 +62,33 @@
  * de 177,5 a 126,6, por desenrollar la escritura de planos (se fueron el
  * dbf y el lea de cada plano).
  *
- * Por columna marcada lo medido es la suma de la columna y sus 3 bytes; el
- * reparto entre las dos (19 + 3 x 36) sale de contar instrucciones, no de
- * la medicion. El intercepto del ajuste dio negativo, que es un artefacto:
- * se usa 0. Con 4 planos se midio aparte (ver DECISIONS.md).
+ * Por columna marcada lo medido es la suma de la columna y sus bytes; el
+ * reparto entre las dos (19 + planos x A5_CYC_BYTE) sale de contar
+ * instrucciones, no de la medicion. El intercepto del ajuste dio negativo,
+ * que es un artefacto: se usa 0.
+ *
+ * El costo por byte NO es el mismo con cualquier cantidad de planos,
+ * porque el DMA de bitplanes le roba slots de bus a la CPU. Medido con el
+ * mismo metodo, manteniendo 900 ciclos por fila:
+ *
+ *   3 planos: 36 ciclos por byte (127 por columna), medido 126,6
+ *   4 planos: 36 ciclos por byte (163 por columna), medido 168,5
+ *   5 planos: 43 ciclos por byte (234 por columna), medido 235,6
+ *
+ * Con 3 y 4 planos el byte cuesta lo mismo; con 5 cuesta un 19 % mas. En
+ * lowres el DMA de bitplanes usa slots que con 4 planos o menos le sobran
+ * a la CPU, y con 5 se los empieza a sacar. 1 y 2 planos no se midieron:
+ * usan el mismo 36.
  */
 #define A5_CPU_HZ            7093790.0
 #define A5_CYC_FRAME         0
 #define A5_CYC_ROW           900
 #define A5_CYC_COL           19
 #define A5_CYC_BYTE          36
+#define A5_CYC_BYTE_5PL      43
+
+/* Ciclos por byte literal escrito, con `planes` bitplanes en pantalla. */
+long a5_cyc_byte(int planes);
 #define A5_FRAME_BUDGET_CYC  ((long)(A5_CPU_HZ * 0.040))
 #define A5_CYC_PER_VBL       (A5_CPU_HZ / A5_VBL_HZ)   /* ~142103 */
 
@@ -153,7 +170,7 @@ const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
                               A5DeltaStats *st);
 
 /* Cuenta el costo de un delta ya codificado sin aplicarlo. */
-long a5_delta_cost(const A5DeltaStats *st);
+long a5_delta_cost(const A5DeltaStats *st, int planes);
 
 /* --- cabecera y doblado ------------------------------------------------- */
 
