@@ -87,6 +87,11 @@ void a5_depack_row(const uint8_t *planar, int planes, uint8_t *idx_row)
 
 /* --- delta --------------------------------------------------------------- */
 
+long a5_cyc_blit(int planes)
+{
+    return planes >= 5 ? A5_CYC_BLIT_5PL : A5_CYC_BLIT;
+}
+
 long a5_delta_cost(const A5DeltaStats *st)
 {
     return A5_CYC_FRAME

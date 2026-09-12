@@ -90,6 +90,30 @@
 #define A5_CYC_AUDIO_FILL    32300
 #define A5_CYC_AUDIO_FILL_PCM8 28200
 
+/* --- costo de la copia con el Blitter (H12) ------------------------------
+ * Medido el 2026-09-12 con el disco de medicion, copiando 16 veces el area
+ * activa de un framebuffer al otro con la imagen en pantalla (o sea con la
+ * contencion de DMA real) y la CPU esperando al Blitter:
+ *
+ *   Blitter normal: 8,814 ms de media (62 527 ciclos), el peor 10,191 ms
+ *   Blitter nasty : 6,685 ms de media (47 422 ciclos), el peor 7,358 ms
+ *
+ * Con 4 planos y 94 filas activas, nasty da 47422 / (4 x 94) = 126 ciclos
+ * por plano y por fila. El reproductor usa nasty siempre: la CPU no tiene
+ * nada que hacer mientras espera.
+ *
+ * Con 5 planos, medido en el propio lazo de reproduccion (151 copias, con
+ * audio): 9,259 ms de media. De ahi hay que descontar los llenados de
+ * audio que caen dentro de la espera, que la linea de tiempo ya cuenta
+ * aparte: si un llenado (5,04 ms) cae con probabilidad copia/64 ms, la
+ * copia pura queda en 8,58 ms = 60 870 ciclos, o 130 por plano y por fila.
+ * La peor copia medida, 14,885 ms, es justo una con un llenado adentro. */
+#define A5_CYC_BLIT          126
+#define A5_CYC_BLIT_5PL      130
+
+/* Ciclos de la copia del visible al oculto, por plano y por fila activa. */
+long a5_cyc_blit(int planes);
+
 long a5_audio_fill_cost(int format);
 
 /* --- buffer de bytes que crece ----------------------------------------- */
