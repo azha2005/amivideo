@@ -958,6 +958,165 @@ medicion y reproduce desde los ~55 s de encendida la maquina.
 
 ---
 
+## 2026-09-12 — Imagen real: la receta se da vuelta
+
+**Metodo:** Az probo `btf.mp4` (1920x1080, 25 fps exactos, progresivo,
+22,29 s, imagen real) con los parametros del anime y "se veia horrible".
+
+**Por que cuesta tanto mas que el anime.** Tres cosas, las tres medidas:
+
+| | anime (lo que anduvo) | btf.mp4 |
+|---|---|---|
+| Frames casi identicos al anterior | 45,6 % | **18,1 %** |
+| Escenas | 15 en 30 s | **36 en 22 s** |
+| Tamano sin perdida | 1,63 MB (30 s) | **1,27 MB (22 s)** |
+
+A 25 fps contra los 24,96 de la pantalla la cadencia es 1:1: no hay
+repeticiones regaladas. El anime esta animado en dos y de ahi salia medio
+disco. Ademas, imagen real es tono continuo: 8 colores por escena estan
+pensados para colores planos de cel.
+
+Con los defaults el control de tasa tuvo que subir el umbral a **0,216**,
+que es exactamente el territorio que el Hito 2 dio por inaceptable:
+**34,6 % de los pixeles** con restos del frame anterior pegados.
+
+**Medido** (22 s salvo aviso, error contra la fuente):
+
+| variante | sin perdida | umbral | vs. fuente |
+|---|---|---|---|
+| 8 col, min-hold 2 (default) | 1 267 420 | 0,216 | 35,2 % |
+| 8 col, min-hold 3 | 986 268 | 0,122 | 22,9 % |
+| 8 col, min-hold 4 | 816 404 | ninguno | 19,6 % |
+| 8 col, min-hold 3 + dither bayer4 | 995 822 | 0,126 | 23,8 % |
+| 8 col, min-hold 2, 15 s | 790 200 | ninguno | 9,4 % |
+| 16 col, min-hold 2, 12 s | 818 548 | ninguno | 7,7 % |
+| 16 col, min-hold 2, 13 s | 890 610 | 0,058 | 8,2 % |
+| **16 col, min-hold 2, sharpen 0, 13 s** | **824 164** | **ninguno** | **6,7 %** |
+| 16 col, min-hold 2, sharpen 0, 15 s | 975 400 | 0,100 | 10,5 % |
+| 16 col, min-hold 2, sharpen 0, 17 s | 1 146 994 | 0,148 | 22,4 % |
+
+**Decision para imagen real: `--planes 4 --min-hold 2 --sharpen 0` y acortar
+el clip.** Con 13 s entra sin ninguna perdida y queda en 6,7 %, mejor que el
+disco de anime (9,6 %). Los tres cambios contradicen lo decidido para el
+anime, y cada uno por su motivo:
+
+1. **16 colores.** El Hito 2 los descarto porque el 4.º plano cuesta 33 %
+   mas bytes y el anime no los necesitaba. Aca el error de cuantizacion baja
+   de 0,036 a 0,026 solo por tener la paleta: la piel y los degrades la
+   piden.
+2. **Sin franjas de paleta** (con 16 colores el encoder las apaga solo,
+   `encode.c:814`, porque el Copper no llega). En imagen real las franjas
+   son **contraproducentes**: sobre un cielo liso cada franja elige un azul
+   apenas distinto y queda una costura horizontal durisima, mucho peor que
+   lo que `--band-snap` corrige en el anime. Se ve en `work\btf8.mp4`.
+3. **`--sharpen 0`.** El default 1,2 existe porque el anime vive de la linea
+   negra de contorno; en imagen real solo realza grano de pelicula. Bajo el
+   error de 8,2 % a 6,7 % **y** libero 66 KB.
+
+**Lo que no funciono:** el dither ordenado perdio las tres veces que se
+probo (igual que en el Hito 6). Y `--stability 0.15` parecia mejorar
+(salpicado 29,4 % contra 34,6 %) pero **empeoraba contra la fuente**
+(38,2 %): la histeresis pega colores viejos, y la metrica de salpicado no lo
+ve porque compara contra el frame cuantizado ideal, no contra el original.
+Es la misma trampa que obligo a inventar la metrica "vs. fuente" en el
+Hito 6.
+
+**Costo:** con 16 colores el 68000 va mas justo. El modelo predice 39 frames
+tarde (el peor por 2 VBL) y 3 degradados, contra 1 solo en el disco de
+anime.
+
+**Bug encontrado:** con una fuente mas rapida que 24,96 fps los frames no se
+repiten, se **descartan**, y la resta sin signo informaba "4294967295 frames
+repetidos".
+
+---
+
+## 2026-09-12 — Video en streaming desde disquete: no da
+
+**Esto contradice a `CLAUDE.md`**, que deja como opcion futura "soporte
+multidisco en streaming con cambio de disco sin cortar el video". Para
+**video** eso no existe, y no es un problema de software.
+
+| | bytes/s |
+|---|---|
+| Lectura medida (Hito 4, trackdisk con rebote) | 17,9 KB/s |
+| Techo fisico de una disquetera DD | ~28 KB/s (11 sectores x 512 por vuelta, 5 vueltas/s) |
+| Anime, como quedo | 39 KB/s |
+| btf, la receta de 13 s | 63 KB/s |
+
+El video se consume 2 a 3,5 veces mas rapido de lo que el disco entrega.
+**Medido** lo que se podria mostrar si el bitstream se limitara a la
+velocidad de lectura (btf, 22 s, `--min-hold 4 --sharpen 0`):
+
+| presupuesto | umbral | vs. fuente |
+|---|---|---|
+| 403 000 (17,9 KB/s, trackdisk de hoy) | 0,330 | **50,7 %** |
+| 528 000 (24 KB/s, trackloader propio) | 0,243 | **40,5 %** |
+
+Las dos son peores que la version que Az llamo horrible (35 %). Ni con el
+trackloader propio con Blitter alcanza.
+
+**Lo que si se puede: multidisco por tandas.** Cargar, tocar, pedir el disco
+siguiente, cargar, seguir: ~13-22 s de video por disquete con **~50 s de
+intermedio**. Es un formato de capitulos, no una pelicula continua. El
+diseno tendria un `stream_id` de 32 bits en la cabecera (para rechazar el
+disco 2 de otra pelicula), corte en limite de paquete y preferentemente en
+un cambio de escena, y los dos framebuffers simulados en negro al empezar
+cada disco (primer frame como delta completo, ~6 KB, gratis si cae en un
+corte).
+
+**Precarga parcial:** no hace falta cargar todo antes de empezar, alcanza
+con juntar la diferencia entre consumo y lectura. Para el anime,
+`(39 - 17,9) x 22 = 464 KB`, o sea **26 s de espera en vez de 50**. Pero
+exige leer mientras se reproduce, y hoy no hay CPU: la decodificacion media
+ya esta en 37,6 ms de los 40. La precarga parcial y el trackloader propio
+son el mismo proyecto.
+
+**Donde el multidisco si funciona: el audio.** ADPCM son 3,91 KB/s contra
+17,9 de lectura, 4,6x de margen. En A5MU se podria arrancar la musica a los
+2 segundos en vez de esperar la carga entera, y encadenar discos **sin
+cortar**: con 60 s de buffer (235 KB de los ~900 disponibles) sobra tiempo
+para cambiar el disquete. Si el multidisco se hace alguna vez, conviene
+hacerlo primero ahi.
+
+---
+
+## 2026-09-12 — El techo no lo pone el disco, lo pone la CPU
+
+**Pregunta de Az:** si el tamano del archivo no fuera problema, cuanta
+calidad se podria tener.
+
+**Medido** (btf, 13 s, `--quality 0 --budget 0 --min-hold 1 --sharpen 0`,
+o sea sin ninguna perdida, sin tope de tamano y actualizando los 24,96
+huecos por segundo):
+
+| | 16 colores | 8 colores + franjas |
+|---|---|---|
+| Error de cuantizacion | 0,0263 | 0,0321 |
+| vs. fuente | **1,35 %** | 3,64 % |
+| Salpicado | 0,04 % | — |
+| Tasa | **84,3 KB/s** | 62,3 KB/s |
+| Frames tarde | **304 de 324** | 281 de 324 |
+| Peor atraso | **129 VBL (2,6 s)** | 42 VBL |
+
+O sea: la imagen puede llegar a **1,35 % de pixeles lejos del original**
+(contra 6,7 % de la receta que entra en un disquete), pero **el 68000 no
+puede mostrarla**. Con el modelo de costo calibrado del Hito 4
+(`5580 + 852 x filas + 177 x columnas` con 3 planos), repintar la pantalla
+entera cuesta 60,3 ms con 8 colores y ~75 ms con 16. Un hueco de pantalla
+dura 40,06 ms.
+
+**El limite duro: el 68000 repinta la pantalla entera unas 13 veces por
+segundo con 16 colores y 16 con 8 colores.** Donde cambia poco se puede ir a
+los 24,96 fps; donde cambia todo, no. Por eso `--min-hold 2` no es una
+concesion al disco, es lo que el procesador puede.
+
+**Y la RAM tambien pone un techo:** a 84,3 KB/s, los ~900 KB que entran en
+memoria son **10,7 segundos** de video. Aun con el disquete fuera de la
+ecuacion, cargar y reproducir no pasa de ahi.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
