@@ -23,7 +23,7 @@
 #define A5V_HDR_BANDROWS 29
 #define A5_MAX_BANDS     128
 
-#define A5_MAX_PLANES    4
+#define A5_MAX_PLANES    5
 #define A5_ROWBYTES      (A5_W / 8)          /* 20 bytes logicos por fila */
 #define A5_ROWMASK_SIZE  (A5_H / 8)          /* 16 bytes de mapa de filas */
 #define A5_COLMASK_SIZE  3                   /* 20 bits de columnas, en 3 bytes */

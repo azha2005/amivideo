@@ -807,7 +807,7 @@ int main(int argc, char **argv)
         {
             int y;
             for (y = 0; y < A5_H; y++) {
-                uint8_t planar[A5_MAX_COLORS * A5_ROWBYTES];
+                uint8_t planar[A5_MAX_PLANES * A5_ROWBYTES];
                 int pi, x;
                 for (pi = 0; pi < planes; pi++)
                     memcpy(planar + pi * A5_ROWBYTES,

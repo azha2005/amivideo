@@ -108,10 +108,12 @@ apply_delta:
         movem.l d0-d7/a1/a4-a6,-(sp)
         lea     16(a0),a4                     ; a4 = datos de las filas
         move.l  a2,a5                         ; a5 = fila actual, plano 0
-        cmp.w   #3,d6                         ; los dos casos que se usan
+        cmp.w   #3,d6                         ; los casos que se usan
         beq     .three
         cmp.w   #4,d6
         beq     .four
+        cmp.w   #5,d6
+        beq     .five
 
         moveq   #15,d5                        ; generico: 1 o 2 planos
 .mbyte: move.b  (a0)+,d4
@@ -152,6 +154,8 @@ apply_delta:
 .three: DELTA_ROWS  3
         bra     .done
 .four:  DELTA_ROWS  4
+        bra     .done
+.five:  DELTA_ROWS  5
 .done:  move.l  a4,a0                         ; fin del delta
         movem.l (sp)+,d0-d7/a1/a4-a6
         rts

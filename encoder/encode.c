@@ -653,7 +653,9 @@ static void usage(void)
 "                                    original; el audio no se toca\n"
 "                            pal:    frames 1:1, todo 4%% mas rapido y el\n"
 "                                    audio sube de tono, como la TV PAL\n"
-"  --planes N              2, 3 o 4 bitplanes = 4, 8 o 16 colores (3)\n"
+"  --planes N              2 a 5 bitplanes = 4, 8, 16 o 32 colores (3).\n"
+"                          Con mas de 3 no hay franjas de paleta: el Copper\n"
+"                          no llega a cambiarlas antes de la linea\n"
 "  --band-rows N           paleta por franjas de N filas logicas, cambiada\n"
 "                          por el Copper; 0 = una sola paleta (16). Con 16\n"
 "                          colores no se puede: una sola\n"
@@ -802,7 +804,7 @@ int main(int argc, char **argv)
         }
     }
     if (!in) { usage(); return 2; }
-    if (planes < 1 || planes > 4) die("--planes tiene que ser 1..4");
+    if (planes < 1 || planes > 5) die("--planes tiene que ser 1..5");
     if (audio_period < 124 || audio_period > 65535)
         die("periodo de audio fuera de rango (124..65535; Paula no baja de 124)");
     if (reserve_tail < 0) die("--reserve-tail no puede ser negativo");

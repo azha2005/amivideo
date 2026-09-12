@@ -27,7 +27,7 @@
 #define A5_VBL_HZ        (A5_CCK_PAL / (A5_PAL_LINES * (double)A5_CCK_PER_LINE))
 #define A5_VIDEO_FPS     (A5_VBL_HZ / 2.0)
 
-#define A5_MAX_COLORS    16      /* 4 bitplanes */
+#define A5_MAX_COLORS    32      /* 5 bitplanes */
 
 /* --- color --------------------------------------------------------------
  * Oklab como espacio perceptual. Es mas simple que CIE Lab, no necesita

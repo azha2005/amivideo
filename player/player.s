@@ -157,7 +157,7 @@ entry:
         moveq   #0,d6
         move.b  12(a0),d6                     ; d6 = bitplanes
         beq     badhdr
-        cmp.w   #4,d6
+        cmp.w   #5,d6                         ; 5 planos = 32 colores
         bhi     badhdr
         tst.l   20(a0)                        ; al menos un paquete
         beq     badhdr
