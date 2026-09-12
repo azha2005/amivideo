@@ -194,8 +194,24 @@ tiempo, y cierran la puerta a min-hold 1. Ver `DECISIONS.md`.
 
 **H12 ya esta hecho** (2026-09-12) y libero justo el presupuesto que hacia
 falta: con 5 planos (32 colores) el video de prueba entra a 13 s con 5,89 %
-de error, y sobran 83 KB de disco. Lo que sigue es el paso siguiente de
-color, y ahora si hay lugar para discutirlo.
+de error, y sobran 83 KB de disco.
+
+### H18 — Franjas parciales de paleta  **[HECHO 2026-09-12]**
+
+El color barato de esta maquina no esta en los planos: esta en el Copper.
+Cada franja hereda la paleta de la de arriba y cambia unos pocos colores al
+empezar, que es lo unico que entra en el borde horizontal (unos 12; el
+material pide menos de 6).
+
+- **Cuesta cero bytes de delta y cero tiempo de decodificacion**, a
+  diferencia de un plano mas.
+- Error de cuantizacion de btf: 0,0212 -> **0,0201**; melissa: 0,0204 ->
+  **0,0196** (franjas de 8 filas). Es menos de lo que daba la simulacion
+  sobre un frame suelto porque la paleta es por escena.
+- Le gana a los 64 colores de EHB, que costarian 20 % de bytes y 36 % de
+  tiempo.
+- Formato v6. Verificado byte a byte contra el decoder de referencia y
+  contra el copper list de la Amiga.
 
 ### H16 — HAM6 para material lento
 
