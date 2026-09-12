@@ -243,6 +243,24 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
                        "estampa rota y la media no es confiable\n");
         }
     }
+
+    /* H12: cuanto tarda el Blitter en copiar el area activa de un
+     * framebuffer al otro, que es lo que costaria predecir el delta desde
+     * el buffer visible. Medido con la imagen en pantalla, o sea con la
+     * contencion de DMA real, y con la CPU esperando al Blitter. */
+    if (be32(in + 132)) {
+        uint32_t it = be32(in + 132);
+        double m  = (double)be32(in + 116) / it;
+        double mn = (double)be32(in + 124) / it;
+
+        printf("blit (H12) : copiar el area activa, %u veces\n", (unsigned)it);
+        printf("             normal: %.3f ms de media, %.3f el peor "
+               "(%.0f ciclos de CPU)\n", m * 1000 / A5_CCK_PAL,
+               be32(in + 120) * 1000.0 / A5_CCK_PAL, 2.0 * m);
+        printf("             nasty : %.3f ms de media, %.3f el peor "
+               "(%.0f ciclos de CPU)\n", mn * 1000 / A5_CCK_PAL,
+               be32(in + 128) * 1000.0 / A5_CCK_PAL, 2.0 * mn);
+    }
     if (np < 3) {
         printf("decodif.   : muy pocos tiempos para ajustar el modelo (%d)\n",
                np);

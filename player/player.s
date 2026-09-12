@@ -104,7 +104,11 @@ V_AFEND     equ 196     ; 8  estampa del final del ultimo llenado
 V_AFSUM     equ 204     ; l  color clocks llenando buffers, sumados
 V_AFMAX     equ 208     ; l  el llenado mas largo
 V_PALPTR    equ 212     ; l  paletas vigentes, dentro de su paquete
-VARS_SIZE   equ 216
+V_BLTSUM    equ 216     ; l  H12: color clocks de los blits, sumados
+V_BLTMAX    equ 220     ; l  el blit mas largo
+V_BLTSUMN   equ 224     ; l  idem con el Blitter en nasty
+V_BLTMAXN   equ 228     ; l
+VARS_SIZE   equ 232
 
 ;----------------------------------------------------------------------
 ; Cabecera del reproductor. mkadf escribe donde quedaron los datos.
@@ -535,6 +539,11 @@ entry:
         move.w  #$0080,INTREQ(a0)
         move.w  #$0080,INTREQ(a0)
 
+        ifd     BENCH
+        bsr     bench_blit                    ; H12: con la imagen todavia en
+        endc                                  ; pantalla, o sea con la
+                                              ; contencion de DMA real
+
         lea     loadcop_end(pc),a0            ; pantalla negra: barra en cero
         move.w  #(BAR_TOP<<8)|$07,(a0)
         lea     loadcop(pc),a0
@@ -901,6 +910,113 @@ elapsed:
         rts
 
 ;----------------------------------------------------------------------
+; bench_blit - H12: cuanto tarda el Blitter en copiar el area activa de un
+; framebuffer al otro, que es lo que haria falta para predecir el delta
+; desde el buffer visible en vez del oculto.
+;
+; Se mide al final de la reproduccion, con la imagen todavia en pantalla:
+; asi el Blitter compite por los slots de DMA con los bitplanes, que es la
+; condicion real. La CPU se queda esperandolo, que tambien es el caso real,
+; porque el delta escribe en el mismo buffer.
+;
+; Dos veces: con el Blitter normal y con BLTPRI ("nasty"), donde el Blitter
+; le gana los ciclos a la CPU.
+;----------------------------------------------------------------------
+BLT_ITER      equ 16
+
+bench_blit:
+        movem.l d0-d6/a0-a3,-(sp)
+        lea     CUSTOM,a0
+        move.w  #$8040,DMACON(a0)             ; BLTEN
+
+        lea     header(pc),a1                 ; d5 = filas activas
+        moveq   #0,d5
+        move.w  18(a1),d5
+        sub.w   16(a1),d5
+        ble     .out
+
+        move.w  V_HIDDEN(a4),d0               ; destino: el buffer oculto
+        add.w   d0,d0
+        add.w   d0,d0
+        lea     V_FB(a4),a1
+        move.l  0(a1,d0.w),a2
+        eor.w   #4,d0
+        move.l  0(a1,d0.w),a3                 ; origen: el visible
+
+        lea     header(pc),a1                 ; saltar las filas de arriba
+        moveq   #0,d0
+        move.w  16(a1),d0
+        mulu    #FB_ROWBYTES,d0
+        add.l   d0,a2
+        add.l   d0,a3
+
+        move.w  d5,d2                         ; BLTSIZE = filas<<6 | palabras
+        lsl.w   #6,d2
+        or.w    #FB_ROWBYTES/2,d2
+
+        moveq   #0,d3                         ; 0 = normal, 1 = nasty
+.mode:  tst.w   d3
+        bne.s   .nasty
+        move.w  #$0400,DMACON(a0)             ; BLTPRI apagado
+        bra.s   .go
+.nasty: move.w  #$8400,DMACON(a0)             ; BLTPRI encendido
+.go:    moveq   #BLT_ITER-1,d4
+.iter:  lea     V_STAMP0(a4),a1
+        bsr     stamp
+        bsr     do_blit
+        lea     V_STAMP1(a4),a1
+        bsr     stamp
+        bsr     elapsed                       ; d0 = color clocks
+        tst.w   d3
+        bne.s   .accn
+        add.l   d0,V_BLTSUM(a4)
+        cmp.l   V_BLTMAX(a4),d0
+        bls.s   .next
+        move.l  d0,V_BLTMAX(a4)
+        bra.s   .next
+.accn:  add.l   d0,V_BLTSUMN(a4)
+        cmp.l   V_BLTMAXN(a4),d0
+        bls.s   .next
+        move.l  d0,V_BLTMAXN(a4)
+.next:  dbf     d4,.iter
+        addq.w  #1,d3
+        cmp.w   #2,d3
+        blo     .mode
+        move.w  #$0400,DMACON(a0)             ; dejarlo cortes
+.out:   movem.l (sp)+,d0-d6/a0-a3
+        rts
+
+;----------------------------------------------------------------------
+; do_blit - copia el area activa, un blit por plano.
+;   a0 = CUSTOM, a2 = destino, a3 = origen, d2 = BLTSIZE, d6 = planos.
+;----------------------------------------------------------------------
+do_blit:
+        movem.l d0-d1/a1,-(sp)
+        move.l  a2,a1                         ; a1 = plano destino
+        move.l  a3,d0                         ; d0 = plano origen
+        move.w  d6,d1
+        subq.w  #1,d1
+.plane: btst    #6,DMACONR(a0)                ; BBUSY: se lee dos veces por el
+.w1:    btst    #6,DMACONR(a0)                ; bug de lectura del 68000
+        bne.s   .w1
+        move.w  #$09f0,BLTCON0(a0)            ; A -> D, minterm $F0, sin shift
+        clr.w   BLTCON1(a0)
+        move.l  #$ffffffff,BLTAFWM(a0)        ; BLTAFWM y BLTALWM, contiguos
+        clr.w   BLTAMOD(a0)
+        clr.w   BLTDMOD(a0)
+        move.l  d0,BLTAPT(a0)
+        move.l  a1,BLTDPT(a0)
+        move.w  d2,BLTSIZE(a0)                ; escribirlo arranca el blit
+        add.l   #PLANE_BYTES,d0
+        lea     PLANE_BYTES(a1),a1
+        dbf     d1,.plane
+        btst    #6,DMACONR(a0)
+.w2:    btst    #6,DMACONR(a0)
+        bne.s   .w2
+        movem.l (sp)+,d0-d1/a1
+        rts
+
+;----------------------------------------------------------------------
 ; bench_finish - devuelve la maquina al sistema y graba las mediciones:
 ; la tabla de tiempos y el sector de resumen (FORMAT.md).
 ;----------------------------------------------------------------------
@@ -977,6 +1093,12 @@ bench_finish:
         move.l  d0,104(a0)
         move.l  V_AFSUM(a4),108(a0)
         move.l  V_AFMAX(a4),112(a0)
+        move.l  V_BLTSUM(a4),116(a0)          ; H12: copia con el Blitter
+        move.l  V_BLTMAX(a4),120(a0)
+        move.l  V_BLTSUMN(a4),124(a0)
+        move.l  V_BLTMAXN(a4),128(a0)
+        moveq   #BLT_ITER,d0
+        move.l  d0,132(a0)
 
         move.l  V_IOREQ(a4),a1
         move.w  #CMD_WRITE,IO_COMMAND(a1)

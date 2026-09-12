@@ -60,6 +60,16 @@ CIAA_TODMID         equ $bfe901
 CIAA_TODLO          equ $bfe801
 CIAA_PRA            equ $bfe001         ; bit 1 = LED y filtro (0 = encendido)
 
+; --- Blitter ---
+BLTCON0             equ $040
+BLTCON1             equ $042
+BLTAFWM             equ $044            ; y BLTALWM en $046, contiguos
+BLTAPT              equ $050
+BLTDPT              equ $054
+BLTSIZE             equ $058            ; (filas << 6) | palabras por fila
+BLTAMOD             equ $064
+BLTDMOD             equ $066
+
 ; --- Paula ---
 AUD0LC              equ $0a0
 AUD0LEN             equ $0a4
