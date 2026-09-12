@@ -167,7 +167,17 @@ es lo que necesitan el trackloader y el decodificador por Blitter.
 
 ---
 
-## Rama C: mas calidad por pixel (opcional, medir antes)
+## Rama C: mas calidad por pixel (medido el 2026-09-12: va ultimo)
+
+**Ya se midio, y el resultado es que esta rama no es la que falta.** Con la
+receta de imagen real el error contra la fuente es 6,61 %, del cual solo
+1,35 % es cuantizacion: el resto es temporal (frames sostenidos dos
+huecos). Subir la cadencia a 24,96 fps lo lleva a 2,70 %; mas colores
+compraria unas 3 decimas. Ademas 6 planos cuestan 1,5x en bytes y en
+tiempo, y cierran la puerta a min-hold 1. Ver `DECISIONS.md`.
+
+**Hacer H12 primero.** Lo que sigue queda para despues, y solo si sobra
+presupuesto.
 
 ### H16 — HAM6 para material lento
 

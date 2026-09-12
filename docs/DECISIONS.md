@@ -1198,6 +1198,58 @@ ahora que el reproductor es mas grande.
 
 ---
 
+## 2026-09-12 — Mas colores no es lo que falta: el error es temporal
+
+**Pregunta de Az:** despues del H10, ir por mas colores (H16/H17).
+
+**Lo que dice la medicion: no.** Con la receta de imagen real (btf, 13 s,
+16 colores, `--min-hold 2`) el stream entra **sin ninguna perdida
+espacial**, asi que el 6,61 % de error contra la fuente no se reparte como
+uno esperaria:
+
+| | vs. fuente |
+|---|---|
+| Techo de cuantizacion con 16 colores (sin perdida, 24,96 fps) | 1,35 % |
+| La receta real (`--min-hold 2`, 13 s) | 6,61 % |
+
+Los ~5,3 puntos de diferencia **no son de color**: son frames sostenidos
+dos huecos. Es error temporal, no cromatico.
+
+**Medido, subiendo la cadencia en vez de los colores:**
+
+| 16 colores | vs. fuente | frames tarde |
+|---|---|---|
+| min-hold 2, 13 s | 6,61 % | 7 |
+| min-hold 2, 9 s | 6,39 % | 6 |
+| **min-hold 1, 10 s** | **2,70 %** | **186, el peor por 11 VBL** |
+| min-hold 1, 9 s | 2,85 % | 161, el peor por 11 VBL |
+| min-hold 1, 11 s | 5,25 % | 132 (y ya con perdida) |
+
+Ir a 24,96 fps baja el error **2,4 veces**. Mas colores compraria un 25 %
+de los 1,35 puntos de cuantizacion (medido con el encoder HAM de A5MU sobre
+tres frames de la pelicula: HAM da 0,0168-0,0178 contra 0,0189-0,0231 de 16
+colores), o sea unas **3 decimas de punto**. No hay comparacion.
+
+**Pero el premio todavia no se puede cobrar:** a min-hold 1 la CPU no
+llega. 186 de 250 frames tarde y 31 degradados sin conseguir cumplir el
+`--max-late 2`.
+
+**Y mas colores empuja en contra.** Seis planos son 1,5x mas bytes *y*
+1,5x mas tiempo por columna: con el modelo recalibrado el repintado
+completo pasa de 56 ms (4 planos) a 76 ms, de los 80 que da min-hold 2. Se
+cierra la puerta a min-hold 1 para siempre.
+
+**Decision: H12 (vector de movimiento global con el Blitter) antes que
+H16/H17.** H12 es justo lo que hace falta: abarata el delta, que es lo
+unico que puede hacer viable min-hold 1. Si despues sobra presupuesto, ahi
+se discuten los colores.
+
+**Nota sobre el H10:** con las constantes viejas 6 planos daban 102 ms y
+eran imposibles; ahora dan 76 y entran. O sea que mas colores paso de
+imposible a posible-pero-contraproducente.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
