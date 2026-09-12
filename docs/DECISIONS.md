@@ -1499,6 +1499,56 @@ esos frames tarde, y el reproductor los absorbe con las repeticiones.
 
 ---
 
+## 2026-09-12 — Cuanto se puede estirar la duracion con 32 colores
+
+**Pregunta de Az:** con el H12 hecho y 32 colores andando, que mas se puede
+hacer para estirar la reproduccion.
+
+**Medido** (btf, 5 planos, `--sharpen 0 --predict auto`, presupuesto real
+del disco), error contra la fuente:
+
+| duracion | `--min-hold 2` | `--min-hold 3` | `--min-hold 4` |
+|---|---|---|---|
+| 13 s | **5,89 %** | | |
+| 14 s | **6,01 %** | | |
+| 15 s | 10,05 % | | |
+| 16 s | 14,53 % | **10,24 %** | |
+| 18 s | 25,92 % | 18,03 % | |
+| 20 s | | 27,60 % | |
+| 22 s | | | 26,62 % |
+
+**El segundo 14 es gratis** (+0,12 puntos): a 13 s sobraban 83 KB de disco.
+Del 15 en adelante el disco empieza a morder y cada segundo cuesta caro.
+
+**Pasado el limite del disco, bajar la cadencia gana a meter perdida:** a
+16 s, `--min-hold 3` da 10,24 % contra 14,53 % de `--min-hold 2`. Con menos
+actualizaciones cada una puede ir sin perdida.
+
+**El techo es aritmetico y no lo mueve ninguna opcion del encoder:**
+
+- Un disquete DD da 883 712 bytes de datos. A 63 KB/s (la receta de btf con
+  32 colores) son **14 s**. Duracion = bytes del disco / tasa.
+- **La RAM no es el limite:** 975 KB libres menos 68 KB de framebuffers,
+  copper lists y buffers de audio con 5 planos = 907 KB para datos, mas que
+  los 883 KB del disco. Por eso **cargar mientras reproduce no estira
+  nada** hoy: no hay bytes que no quepan en RAM. Solo serviria para empezar
+  a ver antes (hoy la carga son 43 s de barra) o con un disco mas grande.
+- **Multidisco tampoco duplica.** El consumo (63 KB/s) es 3,5 veces la
+  lectura (18 KB/s medidos), asi que reproduciendo se drena la RAM: la
+  duracion total es RAM / (tasa − lectura) = 907 / 45 = **20 s** con dos
+  discos, no 28. Con el H8 (formato de pista propio, ~26 KB/s) seria
+  907 / 37 = **24,5 s**.
+- Para un video largo de verdad hay que **bajar la tasa**, y el 87,5 % de
+  los bytes son datos literales de planos. Comprimirlos mas cuesta CPU, y
+  el peor delta ya esta en 83,6 ms de los 80 que hay. No hay margen.
+
+**El material pesa mas que cualquier opcion.** btf es el peor caso
+(accion real, camara en movimiento, pantalla entera cambiando). El anime
+medido el 2026-09-11 daba 39 KB/s con 8 colores contra 63 KB/s de btf con
+32: para el opening de 30 s de la meta original, la cuenta es otra.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
