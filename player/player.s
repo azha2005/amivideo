@@ -1114,11 +1114,21 @@ bench_finish:
         move.l  d0,104(a0)
         move.l  V_AFSUM(a4),108(a0)
         move.l  V_AFMAX(a4),112(a0)
-        move.l  V_BLTSUM(a4),116(a0)          ; H12: copia con el Blitter
+        move.l  V_BLTSUM(a4),116(a0)          ; H12: copias con el Blitter
         move.l  V_BLTMAX(a4),120(a0)
-        move.l  V_BLTSUMN(a4),124(a0)
-        move.l  V_BLTMAXN(a4),128(a0)
-        moveq   #BLT_ITER,d0
+        move.l  V_NBLIT(a4),124(a0)
+        ; CRC32 de los dos framebuffers tal como quedaron en Chip. El
+        ; decoder de referencia calcula el mismo sobre los suyos: si alguna
+        ; copia del Blitter o algun delta salio distinto, no coincide.
+        move.l  V_FB(a4),a0
+        move.l  V_FBSIZE(a4),d1
+        bsr     crc_fb
+        lea     infobuf(pc),a0
+        move.l  d0,128(a0)
+        move.l  V_FB+4(a4),a0
+        move.l  V_FBSIZE(a4),d1
+        bsr     crc_fb
+        lea     infobuf(pc),a0
         move.l  d0,132(a0)
 
         move.l  V_IOREQ(a4),a1

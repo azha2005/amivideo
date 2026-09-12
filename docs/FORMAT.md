@@ -387,7 +387,10 @@ despues del 640.
 | 104 | 4 | Periodo de Paula |
 | 108 | 4 | Color clocks llenando buffers de audio, sumados |
 | 112 | 4 | El llenado mas largo, en color clocks |
-| 116 | 396 | Cero |
+| 116 | 4 | Color clocks copiando el visible al oculto con el Blitter, sumados |
+| 120 | 4 | La copia mas lenta, en color clocks |
+| 124 | 4 | Copias hechas (paquetes con el bit 1 de los flags) |
+| 128 | 384 | Cero |
 
 Las estampas cuentan VBL con la interrupcion propia del reproductor; el
 tiempo en color clocks es `VBL x 313 x 227 + linea x 227 + color clock`.

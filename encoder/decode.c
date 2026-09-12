@@ -244,22 +244,17 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
         }
     }
 
-    /* H12: cuanto tarda el Blitter en copiar el area activa de un
-     * framebuffer al otro, que es lo que costaria predecir el delta desde
-     * el buffer visible. Medido con la imagen en pantalla, o sea con la
-     * contencion de DMA real, y con la CPU esperando al Blitter. */
-    if (be32(in + 132)) {
-        uint32_t it = be32(in + 132);
-        double m  = (double)be32(in + 116) / it;
-        double mn = (double)be32(in + 124) / it;
+    /* H12: las copias del buffer visible al oculto que pidieron los
+     * paquetes, cronometradas en el propio lazo de reproduccion (o sea con
+     * la contencion de DMA real y la CPU esperando al Blitter en nasty). */
+    if (be32(in + 124)) {
+        uint32_t nb = be32(in + 124);
+        double m = (double)be32(in + 116) / nb;
 
-        printf("blit (H12) : copiar el area activa, %u veces\n", (unsigned)it);
-        printf("             normal: %.3f ms de media, %.3f el peor "
-               "(%.0f ciclos de CPU)\n", m * 1000 / A5_CCK_PAL,
-               be32(in + 120) * 1000.0 / A5_CCK_PAL, 2.0 * m);
-        printf("             nasty : %.3f ms de media, %.3f el peor "
-               "(%.0f ciclos de CPU)\n", mn * 1000 / A5_CCK_PAL,
-               be32(in + 128) * 1000.0 / A5_CCK_PAL, 2.0 * mn);
+        printf("copias(H12): %u, %.3f ms de media (%.0f ciclos de CPU), "
+               "%.3f ms la peor\n",
+               (unsigned)nb, m * 1000 / A5_CCK_PAL, 2.0 * m,
+               be32(in + 120) * 1000.0 / A5_CCK_PAL);
     }
     if (np < 3) {
         printf("decodif.   : muy pocos tiempos para ajustar el modelo (%d)\n",
@@ -415,6 +410,27 @@ static size_t ref_copper(uint8_t *o, uint32_t fb, int planes, int brows,
     P16(0xffff); P16(0xfffe);
 #undef P16
     return k;
+}
+
+/* CRC32 del framebuffer tal como queda en Chip RAM: cada byte logico
+ * doblado a una palabra big-endian, que es lo que escribe el reproductor.
+ * El disco de medicion deja el suyo en el sector de informacion. */
+static uint32_t fb_crc_doubled(const uint8_t *fb, int planes)
+{
+    uint32_t crc = 0;
+    int p, y, b;
+
+    for (p = 0; p < planes; p++)
+        for (y = 0; y < A5_H; y++)
+            for (b = 0; b < A5_ROWBYTES; b++) {
+                uint16_t w = a5_double_byte(
+                    fb[((size_t)p * A5_H + y) * A5_ROWBYTES + b]);
+                uint8_t two[2];
+                two[0] = (uint8_t)(w >> 8);
+                two[1] = (uint8_t)(w & 0xff);
+                crc = a5_crc32(two, 2, crc);
+            }
+    return crc;
 }
 
 /* Compara el volcado de still.s con el frame decodificado. 1 si coincide. */
@@ -899,6 +915,31 @@ int main(int argc, char **argv)
         printf("preview    : %s\n", preview);
     if (adf)
         report_measure(adf, mpts, nmp, planes, aper, nasamples, nframes);
+
+    /* Verificacion byte a byte de la reproduccion entera: el reproductor de
+     * medicion deja el CRC32 de sus dos framebuffers. Si alguna copia del
+     * Blitter o algun delta salio distinto, no coincide. */
+    if (adf) {
+        const uint8_t *info = adf + MEAS_INFO_SECTOR * 512;
+        if (!memcmp(info, "PLAY", 4) &&
+            (be32(info + 128) || be32(info + 132))) {
+            uint32_t w0 = be32(info + 128), w1 = be32(info + 132);
+            uint32_t g0 = fb_crc_doubled(fb[0], planes);
+            uint32_t g1 = fb_crc_doubled(fb[1], planes);
+            int okfb = (w0 == g0 && w1 == g1);
+
+            printf("framebuffers: CRC %08lX %08lX en la Amiga, %08lX %08lX "
+                   "aca -> %s\n",
+                   (unsigned long)w0, (unsigned long)w1,
+                   (unsigned long)g0, (unsigned long)g1,
+                   okfb ? "identicos" : "DISTINTOS");
+            if (!okfb) {
+                printf("VERIFICACION: FALLA. El reproductor no dejo en Chip "
+                       "lo mismo que el decoder de referencia.\n");
+                return 1;
+            }
+        }
+    }
 
     if (crcdata && asamples && crclen >= nframes * 4u + 4) {
         uint32_t want = be32(crcdata + nframes * 4);
