@@ -78,6 +78,14 @@ int      a5_hist_lookup(const A5Hist *h, uint8_t r, uint8_t g, uint8_t b);
 /* Error medio de cuantizacion (distancia Oklab) ponderado por cuenta. */
 double   a5_hist_mean_error(const A5Hist *h, const A5Palette *pal);
 
+/* Franja de paleta que hereda la de arriba: cambia como mucho kmax entradas
+ * de pal, eligiendolas de cand (la paleta ideal de esta franja), para bajar
+ * el error sobre este histograma. El color 0 no se toca. Devuelve cuantas
+ * cambio. Es lo que permite las franjas con mas de 8 colores: el Copper solo
+ * alcanza a escribir unas pocas al empezar la franja. */
+int      a5_palette_swap(const A5Hist *h, A5Palette *pal,
+                         const A5Palette *cand, int kmax);
+
 /* --- dithering ordenado -------------------------------------------------
  * Prohibida la difusion de error: rompe la compresion delta. Solo Bayer.
  */

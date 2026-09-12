@@ -8,7 +8,7 @@
 #include "a500vp.h"
 
 #define A5V_MAGIC        "A5VP"
-#define A5V_VERSION      5
+#define A5V_VERSION      6
 #define A5V_HEADER_SIZE  32
 
 /* Formato del audio (byte 28 de la cabecera, desde la version 3). */
@@ -21,7 +21,27 @@
  * franja, desde y0; 0 = una sola paleta. Un paquete con paleta trae una
  * paleta completa por franja, y el color 0 es el mismo en todas. */
 #define A5V_HDR_BANDROWS 29
+
+/* Colores que cada franja puede cambiar respecto de la de arriba (byte 30,
+ * desde la version 6). La franja 0 trae su paleta completa; las demas traen
+ * exactamente band_colors pares (indice, color) y el Copper hace un MOVE por
+ * par. Con band_colors = colores-1 se pueden cambiar todos, que es lo que
+ * hacia la version 4 con 8 colores. */
+#define A5V_HDR_BANDCOLORS 30
 #define A5_MAX_BANDS     128
+
+/* Cuantos colores alcanza a escribir el Copper al empezar una franja.
+ * Cuenta de slots: el WAIT despierta en el color clock 8 y la imagen empieza
+ * en el 64 (DDFSTRT $38, mas el retardo de fetch); un MOVE del Copper son 4
+ * color clocks, y dos de ellos se van en los modulos del doblado vertical.
+ * (64 - 8) / 4 - 2 = 12, menos lo que le roban el refresco de memoria (4
+ * slots) y el audio (2) en esa misma ventana. Queda 8 con margen.
+ *
+ * La ventana esta ANTES de DDFSTRT, asi que no depende de cuantos bitplanes
+ * haya: con 5 planos es la misma que con 3. El unico dato medido hasta ahora
+ * es del Hito 6 (con 3 planos, 7 colores entran de sobra y 15 no), que es
+ * consistente. Medido de verdad: ver DECISIONS.md. */
+#define A5_BAND_COLORS_MAX 8
 
 #define A5_MAX_PLANES    5
 #define A5_ROWBYTES      (A5_W / 8)          /* 20 bytes logicos por fila */
@@ -177,7 +197,11 @@ long a5_delta_cost(const A5DeltaStats *st, int planes);
 /* Escribe la cabecera de 32 bytes del bitstream (docs/FORMAT.md). */
 void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_format,
                     int audio_period, int y0, int y1, int band_rows,
-                    uint32_t npackets, uint32_t payload);
+                    int band_colors, uint32_t npackets, uint32_t payload);
+
+/* Palabras de paleta que lleva un paquete con paleta: la franja 0 entera
+ * mas band_colors pares (indice, color) por cada franja siguiente. */
+int  a5v_palette_words(int ncolors, int nbands, int band_colors);
 
 /* Cuantas franjas hay, y a cual pertenece la fila logica y. Las filas fuera
  * de y0..y1-1 usan la franja 0 (son color 0, igual en todas). */

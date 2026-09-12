@@ -366,3 +366,101 @@ int a5_map_pixel_dither(const A5Palette *pal, uint8_t r, uint8_t g, uint8_t b,
     p.L += (t - 0.5f) * strength;
     return nearest(pal->lab, pal->n, p);
 }
+
+/* --- franjas que heredan la paleta de arriba -----------------------------
+ * El Copper no alcanza a reescribir toda la paleta al empezar una franja,
+ * pero si unas pocas entradas. Esto elige cuales: cada vuelta prueba todas
+ * las combinaciones (entrada que se pisa, color candidato) y se queda con la
+ * que mas baja el error ponderado.
+ *
+ * El costo de una prueba es una pasada por el histograma: para los colores
+ * que hoy usan esa entrada, el piso pasa a ser su segundo mejor color; para
+ * el resto, el candidato solo puede mejorar. Asi las 31 x 31 combinaciones
+ * salen en 31 pasadas y no en 961.
+ *
+ * La busqueda usa el histograma agrupado a RGB444, que es la resolucion que
+ * tiene el hardware: baja de decenas de miles de colores distintos a 4096
+ * como mucho, sin cambiar de que lado cae ninguna decision.
+ */
+typedef struct { Oklab lab; double cnt; } SwapBucket;
+
+int a5_palette_swap(const A5Hist *h, A5Palette *pal, const A5Palette *cand,
+                    int kmax)
+{
+    static SwapBucket bk[4096];
+    static double sr[4096], sg[4096], sb[4096];
+    static double d1[4096], d2[4096];
+    static int own[4096];
+    double corr[A5_MAX_COLORS];
+    size_t i;
+    int m = 0, k, c, s, j, done = 0;
+    int idx[4096];
+
+    memset(sr, 0, sizeof sr); memset(sg, 0, sizeof sg);
+    memset(sb, 0, sizeof sb);
+    for (i = 0; i < 4096; i++) bk[i].cnt = 0;
+
+    for (i = 0; i < h->cap; i++) {
+        uint32_t key;
+        int r, g, b, q;
+        if (h->slots[i].key == EMPTY) continue;
+        key = h->slots[i].key;
+        r = (int)((key >> 16) & 0xff); g = (int)((key >> 8) & 0xff);
+        b = (int)(key & 0xff);
+        q = (r >> 4) << 8 | (g >> 4) << 4 | (b >> 4);
+        sr[q] += (double)r * h->slots[i].count;
+        sg[q] += (double)g * h->slots[i].count;
+        sb[q] += (double)b * h->slots[i].count;
+        bk[q].cnt += (double)h->slots[i].count;
+    }
+    for (i = 0; i < 4096; i++) {
+        if (bk[i].cnt <= 0) continue;
+        bk[i].lab = a5_srgb_to_oklab((uint8_t)(sr[i] / bk[i].cnt + 0.5),
+                                     (uint8_t)(sg[i] / bk[i].cnt + 0.5),
+                                     (uint8_t)(sb[i] / bk[i].cnt + 0.5));
+        idx[m++] = (int)i;
+    }
+    if (!m) return 0;
+
+    for (k = 0; k < kmax; k++) {
+        double base = 0, best;
+        int bs = -1, bc = -1;
+
+        for (j = 0; j < m; j++) {
+            const SwapBucket *q = &bk[idx[j]];
+            double a = 1e30, b = 1e30;
+            int w = 0;
+            for (c = 0; c < pal->n; c++) {
+                double d = sqrt((double)a5_oklab_dist2(q->lab, pal->lab[c]));
+                if (d < a)      { b = a; a = d; w = c; }
+                else if (d < b) { b = d; }
+            }
+            d1[j] = a; d2[j] = b; own[j] = w;
+            base += a * q->cnt;
+        }
+        best = base;
+
+        for (c = 1; c < cand->n; c++) {
+            double keep = 0;
+            for (s = 0; s < pal->n; s++) corr[s] = 0;
+            for (j = 0; j < m; j++) {
+                const SwapBucket *q = &bk[idx[j]];
+                double dc = sqrt((double)a5_oklab_dist2(q->lab,
+                                                        cand->lab[c]));
+                double mn = dc < d1[j] ? dc : d1[j];
+                double m2 = dc < d2[j] ? dc : d2[j];
+                keep += mn * q->cnt;
+                corr[own[j]] += (m2 - mn) * q->cnt;
+            }
+            for (s = 1; s < pal->n; s++) {       /* el color 0 no se toca */
+                double e = keep + corr[s];
+                if (e < best - 1e-9) { best = e; bs = s; bc = c; }
+            }
+        }
+        if (bs < 0) break;                       /* no hay mas para ganar */
+        pal->rgb444[bs] = cand->rgb444[bc];
+        pal->lab[bs] = cand->lab[bc];
+        done++;
+    }
+    return done;
+}

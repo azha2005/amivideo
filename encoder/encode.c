@@ -32,6 +32,10 @@ typedef struct {
 
 /* Franjas de paleta, fijas para todo el video (se deciden en main). */
 static int g_band_rows = 0, g_band_y0 = 0, g_nbands = 1;
+/* Colores que cada franja puede cambiar respecto de la de arriba. El Copper
+ * hace un MOVE por color en el borde horizontal y no le entran muchos; el
+ * limite esta medido en DECISIONS.md. */
+static int g_band_colors = 0;
 
 /* La paleta con que se ve la fila logica y. */
 static const A5Palette *rowpal(const A5Palette *pals, int y)
@@ -286,6 +290,30 @@ static void src_account(A5Stream *st, const uint8_t *vis,
     }
 }
 
+/* Costuras entre franjas: una zona lisa que cruza el borde cae en un tono
+ * de un lado y en otro casi igual del otro, y se ve una raya horizontal. Un
+ * color a menos de thr de uno de la franja de arriba pasa a ser exactamente
+ * ese; cada color de arriba se usa una vez. */
+static void snap_to(A5Palette *bp, const A5Palette *up, double thr)
+{
+    int c, u, taken[A5_MAX_COLORS] = { 0 };
+
+    if (thr <= 0) return;
+    for (c = 1; c < bp->n; c++) {
+        int best = -1;
+        float bd = (float)(thr * thr);
+        for (u = 1; u < up->n; u++) {
+            float d = a5_oklab_dist2(bp->lab[c], up->lab[u]);
+            if (!taken[u] && d < bd) { bd = d; best = u; }
+        }
+        if (best >= 0) {
+            taken[best] = 1;
+            bp->rgb444[c] = up->rgb444[best];
+            bp->lab[c] = up->lab[best];
+        }
+    }
+}
+
 /* --- H12: de donde se predice cada delta --------------------------------
  * El delta va normalmente contra el buffer OCULTO, que es el penultimo
  * frame distinto: con --min-hold 2 son 160 ms de movimiento. Si el paquete
@@ -387,8 +415,9 @@ static void put_packet(A5Stream *st, int op, const A5Palette *pal, int ncolors,
                        size_t audio_len, int flags)
 {
     size_t start = st->buf.len;
-    size_t len = 6 + (pal ? (size_t)g_nbands * ncolors * 2 : 0) + audio_len
-               + (video ? video->len : 0);
+    size_t len = 6 + (pal ? (size_t)a5v_palette_words(ncolors, g_nbands,
+                                                     g_band_colors) * 2 : 0)
+               + audio_len + (video ? video->len : 0);
     int b, c;
 
     if (len & 1) len++;                 /* los paquetes quedan pares */
@@ -398,10 +427,36 @@ static void put_packet(A5Stream *st, int op, const A5Palette *pal, int ncolors,
     a5buf_put8(&st->buf, (unsigned)(flags | (pal ? A5V_F_PALETTE : 0)));
     a5buf_put16(&st->buf, (unsigned)audio_len);
 
-    if (pal)                            /* una paleta por franja */
-        for (b = 0; b < g_nbands; b++)
-            for (c = 0; c < ncolors; c++)
-                a5buf_put16(&st->buf, pal[b].rgb444[c]);
+    if (pal) {
+        /* La franja 0 entera; las demas, solo lo que cambia respecto de la
+         * de arriba, como pares (indice, color). Los pares que sobran van
+         * con indice 0, que el reproductor traduce a un MOVE al revive
+         * ($01FE): el color 0 nunca cambia entre franjas. */
+        for (c = 0; c < ncolors; c++)
+            a5buf_put16(&st->buf, pal[0].rgb444[c]);
+        for (b = 1; b < g_nbands; b++) {
+            int k = 0, ndiff = 0;
+            for (c = 1; c < ncolors; c++)
+                if (pal[b].rgb444[c] != pal[b - 1].rgb444[c]) ndiff++;
+            /* Si la franja cambia mas de lo que el Copper escribe, el
+             * paquete no puede llevarlo y el reproductor mostraria otra
+             * cosa que la que simulo el encoder. Es un bug del cuantizador,
+             * no algo para truncar en silencio. */
+            if (ndiff > g_band_colors)
+                die("la franja cambia mas colores de los que entran "
+                    "(bug del cuantizador)");
+            for (c = 1; c < ncolors && k < g_band_colors; c++)
+                if (pal[b].rgb444[c] != pal[b - 1].rgb444[c]) {
+                    a5buf_put16(&st->buf, (unsigned)c);
+                    a5buf_put16(&st->buf, pal[b].rgb444[c]);
+                    k++;
+                }
+            for (; k < g_band_colors; k++) {
+                a5buf_put16(&st->buf, 0);
+                a5buf_put16(&st->buf, 0);
+            }
+        }
+    }
     if (audio_len)
         a5buf_write(&st->buf, audio, audio_len);
     if (video && video->len)
@@ -732,8 +787,11 @@ static void usage(void)
 "                          Con mas de 3 no hay franjas de paleta: el Copper\n"
 "                          no llega a cambiarlas antes de la linea\n"
 "  --band-rows N           paleta por franjas de N filas logicas, cambiada\n"
-"                          por el Copper; 0 = una sola paleta (16). Con 16\n"
-"                          colores no se puede: una sola\n"
+"                          por el Copper; 0 = una sola paleta. 16 con 3\n"
+"                          planos o menos; con mas hay que pedirlo\n"
+"  --band-colors N         colores que cada franja puede cambiar respecto\n"
+"                          de la de arriba; el Copper no llega a mas de 8\n"
+"                          antes de que empiece la linea (colores-1, o 8)\n"
 "  --band-overlap N        filas de las franjas vecinas que entran al\n"
 "                          histograma de cada franja (0)\n"
 "  --band-snap F           un color a menos de F (Oklab) de uno de la franja\n"
@@ -775,6 +833,7 @@ int main(int argc, char **argv)
     const char *boot_path = "work\\boot.bin", *player_path = "work\\player.bin";
     int    reserve_tail = 0;
     int    band_rows = 16, band_overlap = 0, band_rows_set = 0;
+    int    band_colors = 0, band_colors_set = 0;
     double band_snap = 0.04;           /* Hito 6: medidos y mirados */
     uint8_t *boot = NULL, *player = NULL;
     size_t bootlen = 0, playerlen = 0;
@@ -851,6 +910,9 @@ int main(int argc, char **argv)
             band_rows_set = 1;
         }
         else if (!strcmp(a, "--band-overlap") && has)  band_overlap = atoi(argv[++i]);
+        else if (!strcmp(a, "--band-colors") && has) {
+            band_colors = atoi(argv[++i]); band_colors_set = 1;
+        }
         else if (!strcmp(a, "--band-snap") && has)     band_snap = atof(argv[++i]);
         else if (!strcmp(a, "--predict") && has) {
             const char *v = argv[++i];
@@ -981,16 +1043,32 @@ int main(int argc, char **argv)
     /* --- franjas de paleta ------------------------------------------ */
     if (band_rows < 0 || band_rows > A5_H) die("--band-rows fuera de rango");
     if (band_overlap < 0) die("--band-overlap no puede ser negativo");
-    if (planes > 3 && !band_rows_set) band_rows = 0;   /* 16 colores: una */
+    if (planes > 3 && !band_rows_set) band_rows = 0;   /* hay que pedirlas */
     g_nbands = a5v_nbands(band_rows, y0, y1);
     g_band_rows = g_nbands > 1 ? band_rows : 0;
     g_band_y0 = y0;
-    if (g_nbands > 1 && planes > 3)
-        die("las franjas necesitan 3 planos o menos: con 16 colores el "
-            "Copper no llega a cambiarlos antes de que empiece la linea");
+    /* Cuantos colores puede cambiar cada franja. El Copper hace un MOVE por
+     * color entre el WAIT (hpos $06) y el principio de la imagen, y no le
+     * entran todos con mas de 8 colores: el tope medido esta en
+     * DECISIONS.md. Con pocos colores, todos. */
+    if (!band_colors_set)
+        band_colors = ncolors - 1 <= A5_BAND_COLORS_MAX
+                    ? ncolors - 1 : A5_BAND_COLORS_MAX;
+    if (g_nbands > 1) {
+        if (band_colors < 1 || band_colors > ncolors - 1)
+            die("--band-colors tiene que estar entre 1 y colores-1");
+        if (band_colors > A5_BAND_COLORS_MAX)
+            printf("AVISO: %d colores por franja pasan los %d que el Copper "
+                   "alcanza a escribir; los ultimos van a llegar tarde\n",
+                   band_colors, A5_BAND_COLORS_MAX);
+    } else {
+        band_colors = 0;
+    }
+    g_band_colors = band_colors;
     if (g_nbands > 1)
-        printf("paleta     : %d franjas de %d filas logicas (solapamiento "
-               "%d)\n", g_nbands, band_rows, band_overlap);
+        printf("paleta     : %d franjas de %d filas logicas, %d colores por "
+               "franja (solapamiento %d)\n", g_nbands, band_rows,
+               band_colors, band_overlap);
 
     /* --- decodificar ------------------------------------------------ */
     dec = a5_open_decoder(in, start, duration, vfilter, A5_W, A5_H);
@@ -1156,6 +1234,7 @@ int main(int argc, char **argv)
     if (!idx) die("sin memoria para los frames cuantizados");
     {
         int s;
+        long nswap = 0, nswapb = 0;     /* colores cambiados por franja */
         /* Con franjas el negro se reserva siempre: el color 0 es tambien el
          * del borde, y el Copper no lo cambia por franja (FORMAT.md). */
         int reserve_black = ((aspect != ASPECT_CROP) && (y1 - y0 < A5_H))
@@ -1189,31 +1268,29 @@ int main(int argc, char **argv)
                 for (n = 0; n < scenes[s].count; n++)
                     a5_hist_add_frame(h, frames[scenes[s].start + n], A5_W,
                                       hy0, hy1);
-                a5_quantize(h, ncolors, reserve_black,
-                            seed + (uint32_t)s + (uint32_t)b * 100003u, bp);
-
-                /* Costuras: una zona lisa que cruza el borde entre dos
-                 * franjas cae en un tono de un lado y en otro casi igual del
-                 * otro, y se ve una raya horizontal. Un color a menos de
-                 * band_snap de uno de la franja de arriba pasa a ser
-                 * exactamente ese; cada color de arriba se usa una vez. */
-                if (b > 0 && band_snap > 0) {
-                    const A5Palette *up = &scenes[s].pal[b - 1];
-                    int c, u, taken[A5_MAX_COLORS] = { 0 };
-                    for (c = 1; c < bp->n; c++) {
-                        int best = -1;
-                        float bd = (float)(band_snap * band_snap);
-                        for (u = 1; u < up->n; u++) {
-                            float d = a5_oklab_dist2(bp->lab[c], up->lab[u]);
-                            if (!taken[u] && d < bd) { bd = d; best = u; }
-                        }
-                        if (best >= 0) {
-                            taken[best] = 1;
-                            bp->rgb444[c] = up->rgb444[best];
-                            bp->lab[c] = up->lab[best];
-                        }
-                    }
+                if (b == 0 || g_band_colors >= ncolors - 1) {
+                    a5_quantize(h, ncolors, reserve_black,
+                                seed + (uint32_t)s + (uint32_t)b * 100003u,
+                                bp);
+                    if (b > 0) snap_to(bp, &scenes[s].pal[b - 1], band_snap);
+                } else {
+                    /* El Copper no alcanza a cambiar toda la paleta al
+                     * empezar la franja: se hereda la de arriba y se cambian
+                     * las g_band_colors entradas que mas bajan el error,
+                     * eligiendolas de la paleta ideal de esta franja. El
+                     * snap va sobre las candidatas: una candidata casi igual
+                     * a un color heredado se vuelve ese mismo, y entonces
+                     * cambiarla no gana nada y la ranura queda para otra. */
+                    A5Palette cand;
+                    a5_quantize(h, ncolors, reserve_black,
+                                seed + (uint32_t)s + (uint32_t)b * 100003u,
+                                &cand);
+                    snap_to(&cand, &scenes[s].pal[b - 1], band_snap);
+                    *bp = scenes[s].pal[b - 1];
+                    nswap += a5_palette_swap(h, bp, &cand, g_band_colors);
+                    nswapb++;
                 }
+
                 a5_hist_assign(h, bp);
                 scenes[s].unique += a5_hist_unique(h);
                 esum += a5_hist_mean_error(h, bp) * (by1 - by0);
@@ -1261,6 +1338,10 @@ int main(int argc, char **argv)
             }
             scenes[s].error = wsum > 0 ? esum / wsum : 0;
         }
+        if (nswapb)
+            printf("             %.1f colores cambiados por franja de los "
+                   "%d que entran\n", (double)nswap / nswapb,
+                   g_band_colors);
     }
 
     /* --- preview de la cuantizacion, sin comprimir --------------------
@@ -1423,7 +1504,8 @@ int main(int argc, char **argv)
             if (!f) die("no pude abrir el archivo de salida");
             a5buf_init(&hdr);
             a5v_put_header(&hdr, planes, ncolors, au.format, au.period,
-                           y0, y1, g_band_rows, (uint32_t)nframes,
+                           y0, y1, g_band_rows, g_band_colors,
+                           (uint32_t)nframes,
                            (uint32_t)st.buf.len);
             fwrite(hdr.p, 1, hdr.len, f);
             fwrite(st.buf.p, 1, st.buf.len, f);

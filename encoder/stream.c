@@ -215,9 +215,14 @@ int a5v_band_of(int y, int band_rows, int y0, int nbands)
     return b < nbands ? b : nbands - 1;
 }
 
+int a5v_palette_words(int ncolors, int nbands, int band_colors)
+{
+    return ncolors + (nbands - 1) * band_colors * 2;
+}
+
 void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_format,
                     int audio_period, int y0, int y1, int band_rows,
-                    uint32_t npackets, uint32_t payload)
+                    int band_colors, uint32_t npackets, uint32_t payload)
 {
     int has_audio = audio_format != A5V_AUDIO_NONE;
 
@@ -235,7 +240,8 @@ void a5v_put_header(A5Buf *b, int planes, int ncolors, int audio_format,
     a5buf_put32(b, payload);
     a5buf_put8(b, (unsigned)audio_format);     /* 28: formato del audio */
     a5buf_put8(b, (unsigned)band_rows);        /* 29: filas por franja */
-    a5buf_put16(b, 0);
+    a5buf_put8(b, (unsigned)band_colors);      /* 30: colores por franja */
+    a5buf_put8(b, 0);
 }
 
 /* --- audio ---------------------------------------------------------------- */

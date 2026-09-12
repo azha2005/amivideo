@@ -153,7 +153,7 @@ entry:
         lea     header(pc),a0
         cmp.l   #$41355650,(a0)               ; "A5VP"
         bne     badhdr
-        cmp.w   #5,4(a0)                      ; version de formato
+        cmp.w   #6,4(a0)                      ; version de formato
         bne     badhdr
         moveq   #0,d6
         move.b  12(a0),d6                     ; d6 = bitplanes

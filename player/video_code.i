@@ -248,18 +248,16 @@ build_copper:
         bne.s   .nocol
         move.l  a0,d0
         sub.l   a3,d0
-        addq.w  #2,d0
         move.w  d5,d1
         add.w   d1,d1
-        move.w  d0,0(a1,d1.w)                 ; offset del valor de COLOR01
-        moveq   #1,d2
-        lsl.w   d6,d2
-        subq.w  #2,d2                         ; n-1 colores
-        move.w  #$0182,d1
-.bc:    move.w  d1,(a0)+
+        move.w  d0,0(a1,d1.w)                 ; offset del primer MOVE
+        move.w  vc_bandcol(pc),d2             ; ranuras, en revive hasta que
+        subq.w  #1,d2                         ; write_palette las llene
+        bmi.s   .nobc
+.bc:    move.w  #$01fe,(a0)+
         clr.w   (a0)+
-        addq.w  #2,d1
         dbf     d2,.bc
+.nobc:
         addq.w  #1,d5                         ; y la franja siguiente
         move.w  #$7fff,d0
         cmp.w   vc_nbands(pc),d5
@@ -293,11 +291,11 @@ build_copper:
 ;   en todas las franjas (FORMAT.md).
 ;----------------------------------------------------------------------
 write_palette:
-        movem.l d0-d3/a1-a3,-(sp)
+        movem.l d0-d4/a1-a3,-(sp)
         lea     vc_bandoff(pc),a2
         move.w  vc_ncolors(pc),d1
-        move.w  (a2)+,d0                      ; franja 0: en la cabecera
-        lea     0(a0,d0.w),a3
+        move.w  (a2)+,d0                      ; franja 0: la paleta entera,
+        lea     0(a0,d0.w),a3                 ; en los MOVE de la cabecera
         move.w  d1,d2
         subq.w  #1,d2
 .c0:    move.w  (a1)+,(a3)
@@ -306,16 +304,24 @@ write_palette:
         move.w  vc_nbands(pc),d3
         subq.w  #2,d3                         ; franjas 1..
         bmi.s   .done
-.band:  move.w  (a2)+,d0
+.band:  move.w  (a2)+,d0                      ; pares (indice, color)
         lea     0(a0,d0.w),a3
-        addq.l  #2,a1                         ; sin el color 0
-        move.w  d1,d2
-        subq.w  #2,d2
-.cb:    move.w  (a1)+,(a3)
-        addq.l  #4,a3
+        move.w  vc_bandcol(pc),d2
+        subq.w  #1,d2
+        bmi.s   .nextb
+.cb:    move.w  (a1)+,d4                      ; indice
+        beq.s   .pad
+        add.w   d4,d4                         ; COLORxx = $180 + 2 x indice
+        add.w   #$0180,d4
+        move.w  d4,(a3)+
+        move.w  (a1)+,(a3)+
         dbf     d2,.cb
-        dbf     d3,.band
-.done:  movem.l (sp)+,d0-d3/a1-a3
+        bra.s   .nextb
+.pad:   move.w  #$01fe,(a3)+                  ; relleno: MOVE al revive
+        move.w  (a1)+,(a3)+
+        dbf     d2,.cb
+.nextb: dbf     d3,.band
+.done:  movem.l (sp)+,d0-d4/a1-a3
         rts
 
 ;----------------------------------------------------------------------
@@ -346,13 +352,24 @@ set_bands:
         moveq   #0,d2
         move.b  13(a0),d2                     ; colores
         move.w  d2,vc_ncolors-vc_brows(a1)
+        moveq   #0,d3
+        move.b  30(a0),d3                     ; colores por franja
         cmp.w   #1,d0
-        beq.s   .ok
+        beq.s   .single
         cmp.w   #MAX_BANDS,d0
         bhi.s   .bad
-        cmp.w   #8,d2                         ; 16 colores: no llega
-        bhi.s   .bad
-.ok:    mulu    d2,d0
+        tst.w   d3                            ; 1..colores-1
+        beq.s   .bad
+        cmp.w   d2,d3
+        bhs.s   .bad
+        bra.s   .ok
+.single:
+        moveq   #0,d3                         ; una franja: sin pares
+.ok:    move.w  d3,vc_bandcol-vc_brows(a1)
+        subq.w  #1,d0                         ; palabras de paleta:
+        mulu    d3,d0                         ; (franjas-1) x colores x 2
+        add.w   d0,d0
+        add.w   d2,d0                         ; mas la franja 0 entera
         bra.s   .out
 .bad:   moveq   #0,d0
 .out:   movem.l (sp)+,d1-d3/a1
@@ -366,6 +383,8 @@ set_bands:
 vc_brows:   dc.w    0                         ; filas logicas por franja
 vc_y0:      dc.w    0                         ; primera fila activa
 vc_nbands:  dc.w    1                         ; franjas
-vc_ncolors: dc.w    8                         ; colores por franja
-vc_bandoff: ds.w    MAX_BANDS                 ; offset del primer valor de
-                                              ; color de cada franja
+vc_ncolors: dc.w    8                         ; colores de la paleta
+vc_bandcol: dc.w    0                         ; colores que cambia una franja
+vc_bandoff: ds.w    MAX_BANDS                 ; franja 0: offset del valor de
+                                              ; COLOR00; las demas, offset del
+                                              ; registro del primer MOVE

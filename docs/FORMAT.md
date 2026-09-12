@@ -1,6 +1,6 @@
 # Formato del disco de A500VP
 
-**Version de formato: 5.** Define el disco, el arranque y el bitstream de
+**Version de formato: 6.** Define el disco, el arranque y el bitstream de
 video y audio.
 
 La version 2 no definia el contenido del audio de los paquetes (viajaba
@@ -8,7 +8,10 @@ vacio). La 3 lo define y usa el byte 28 de la cabecera, antes reservado,
 para el formato del audio. La 4 agrega la paleta por franjas horizontales
 (byte 29 de la cabecera) y cambia el tamano de la paleta de los paquetes.
 La 5 admite 5 bitplanes (32 colores) y agrega el bit 1 de los flags del
-paquete: copiar el buffer visible al oculto antes del delta.
+paquete: copiar el buffer visible al oculto antes del delta. La 6 cambia
+como viaja la paleta por franjas -- cada franja hereda la de arriba y trae
+solo los colores que cambia -- y usa el byte 30 de la cabecera, antes
+reservado.
 
 Todo es **big-endian**. El 68000 lee el disco con punteros pelados, sin
 conversiones.
@@ -113,7 +116,7 @@ pasa el bootblock.
 | Offset | Tamano | Contenido |
 |---|---|---|
 | 0 | 4 | `"A5VP"` |
-| 4 | 2 | Version = 5 |
+| 4 | 2 | Version = 6 |
 | 6 | 2 | Flags. Bit 0 = hay audio |
 | 8 | 2 | Ancho logico = 160 |
 | 10 | 2 | Alto logico = 128 |
@@ -126,7 +129,8 @@ pasa el bootblock.
 | 24 | 4 | Bytes de paquetes que siguen a la cabecera |
 | 28 | 1 | Formato del audio: 0 = ninguno, 1 = fib4, 2 = pcm8 |
 | 29 | 1 | Filas logicas por franja de paleta (0 = una sola paleta) |
-| 30 | 2 | Reservado, 0 |
+| 30 | 1 | Colores que cada franja puede cambiar (0 si hay una sola franja) |
+| 31 | 1 | Reservado, 0 |
 
 Las filas fuera de `y0..y1-1` son las barras del letterbox: nunca cambian y
 quedan en el color 0.
@@ -144,7 +148,7 @@ viaja en su propio paquete y la sincronia es trivial.
 | 2 | 1 | Operacion: 0 = DELTA, 1 = REPETICION |
 | 3 | 1 | Flags. Bit 0 = trae paleta. Bit 1 = copiar el buffer visible al oculto antes del delta |
 | 4 | 2 | Bytes de audio en este paquete |
-| 6 | … | Paleta: `franjas` x `colores` x 2 bytes, RGB444 como `$0RGB`, franja 0 primero (si el bit 0 esta prendido) |
+| 6 | … | Paleta (si el bit 0 esta prendido), ver abajo |
 | … | … | Audio (los bytes indicados en el offset 4) |
 | … | … | Delta (solo si la operacion es DELTA) |
 | … | 0–1 | Relleno con cero hasta longitud par |
@@ -182,18 +186,32 @@ contra el ultimo frame distinto, 80 ms atras.
 
 El area activa se divide en franjas horizontales de `F` filas logicas (el
 byte 29 de la cabecera), empezando en `y0`; la ultima puede ser mas corta.
-`franjas = ceil((y1 - y0) / F)`, o 1 si `F` vale 0. Cada franja tiene su
-paleta completa de `colores` entradas, y la fila logica `y` se ve con la
-paleta de la franja `(y - y0) / F`. Las filas fuera de `y0..y1-1` usan la
-franja 0 (son todas color 0).
+`franjas = ceil((y1 - y0) / F)`, o 1 si `F` vale 0. La fila logica `y` se ve
+con la paleta de la franja `(y - y0) / F`. Las filas fuera de `y0..y1-1`
+usan la franja 0 (son todas color 0).
 
+**Cada franja hereda la paleta de la de arriba y cambia como mucho
+`band_colors` entradas** (byte 30 de la cabecera), porque eso es lo que el
+Copper alcanza a escribir antes de que empiece la primera linea de la
+franja. Asi viaja la paleta de un paquete:
+
+| Tamano | Contenido |
+|---|---|
+| `colores` x 2 | Franja 0: su paleta entera, RGB444 como `$0RGB`, color 0 primero |
+| `band_colors` x 4, por cada franja 1..n-1 | Pares (indice, color): 2 bytes de indice y 2 de `$0RGB` |
+
+- Los pares van **en orden de indice ascendente**, y los que sobran van con
+  **indice 0**: el color 0 no se puede cambiar, asi que el indice 0 es
+  relleno. El reproductor lo traduce a un `MOVE` al registro `$01FE`, que no
+  hace nada.
 - **El color 0 es el mismo en todas las franjas.** Es tambien el color del
-  borde, y el Copper lo escribe una sola vez por frame; el decoder de
-  referencia rechaza un paquete que no lo cumpla.
-- **Con 4 o 5 bitplanes solo se admite una franja.** El Copper cambia los
-  colores 1..n-1 de una franja al principio de su primera linea de
-  pantalla, antes de que empiece la imagen: 7 colores entran de sobra, 15
-  no (ver `DECISIONS.md`).
+  borde, y el Copper lo escribe una sola vez por frame.
+- `band_colors` va de 1 a `colores - 1`. Con `colores - 1` una franja puede
+  cambiar toda la paleta, que es lo que hacian las franjas de 8 colores
+  hasta la version 5.
+- Con 32 colores el Copper llega a unos **12** colores por franja (la cuenta
+  y la medicion, en `DECISIONS.md`). El encoder usa 8 y el material real
+  pide menos de 6.
 - Maximo 128 franjas (una por fila logica).
 
 ### Delta

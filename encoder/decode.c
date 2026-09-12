@@ -375,14 +375,13 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
 /* El copper list que arman build_copper + write_palette (video_code.i),
  * con la misma receta instruccion por instruccion. Devuelve su largo. */
 static size_t ref_copper(uint8_t *o, uint32_t fb, int planes, int brows,
-                         int y0, int y1, const A5Color *pal)
+                         int y0, int y1, const A5Color *pal, int bandcolors)
 {
     int n = 1 << planes, nb = a5v_nbands(brows, y0, y1), b = 1, p, c, d;
     int next = nb > 1 ? DIW_FIRST + 2 * (y0 + brows) : 0x7fff;
     size_t k = 0;
 
-#define P16(v) (o[k] = (uint8_t)((unsigned)(v) >> 8), \
-                o[k + 1] = (uint8_t)(v), k += 2)
+#define P16(v) (o[k] = (uint8_t)((unsigned)(v) >> 8),                 o[k + 1] = (uint8_t)(v), k += 2)
     P16(0x008e); P16(0x2c81); P16(0x0090); P16(0x2cc1);   /* DIWSTRT/STOP */
     P16(0x0092); P16(0x0038); P16(0x0094); P16(0x00d0);   /* DDFSTRT/STOP */
     P16(0x0102); P16(0);      P16(0x0104); P16(0);        /* BPLCON1/2 */
@@ -398,10 +397,18 @@ static size_t ref_copper(uint8_t *o, uint32_t fb, int planes, int brows,
         unsigned mod = (d & 1) ? 0 : 0xffd8;
         if (d == 0x100) { P16(0xffdf); P16(0xfffe); }     /* linea 256 */
         P16(((d & 0xff) << 8) | 0x07); P16(0xfffe);       /* WAIT hpos $06 */
-        if (d == next) {                                   /* franja nueva */
-            for (c = 1; c < n; c++) {
-                P16(0x180 + 2 * c); P16(pal[b * n + c]);
-            }
+        if (d == next) {
+            /* Franja nueva: los colores que cambian respecto de la de
+             * arriba, en orden de indice, y el resto de las ranuras con el
+             * MOVE al revive ($01FE), que no hace nada. Es exactamente lo
+             * que el reproductor arma con los pares del paquete. */
+            int w = 0;
+            for (c = 1; c < n && w < bandcolors; c++)
+                if (pal[b * n + c] != pal[(b - 1) * n + c]) {
+                    P16(0x180 + 2 * c); P16(pal[b * n + c]);
+                    w++;
+                }
+            for (; w < bandcolors; w++) { P16(0x01fe); P16(0); }
             b++;
             next = b < nb ? next + 2 * brows : 0x7fff;
         }
@@ -436,7 +443,7 @@ static uint32_t fb_crc_doubled(const uint8_t *fb, int planes)
 /* Compara el volcado de still.s con el frame decodificado. 1 si coincide. */
 static int check_still(const char *path, const uint8_t *fb, int planes,
                        int brows, int y0, int y1, const A5Color *pal,
-                       long delta_used)
+                       int bandcolors, long delta_used)
 {
     static uint8_t cop[STILL_COP_MAX + 64];
     size_t dl = 0, cl, k;
@@ -469,7 +476,8 @@ static int check_still(const char *path, const uint8_t *fb, int planes,
                 }
             }
 
-    cl = ref_copper(cop, be32(info + 8), planes, brows, y0, y1, pal);
+    cl = ref_copper(cop, be32(info + 8), planes, brows, y0, y1, pal,
+                    bandcolors);
     for (k = 0; k < cl; k++)
         if (copd[k] != cop[k]) {
             if (cfirst < 0) cfirst = (long)k;
@@ -517,7 +525,7 @@ static int check_still(const char *path, const uint8_t *fb, int planes,
  * (<out>.fb: planos doblados a 40 bytes por fila, plano 0 primero) y una
  * imagen de referencia de 320x256 (<out>.ppm). */
 static void write_still(const char *out, int planes, int ncolors, int y0,
-                        int y1, int brows, const uint8_t *idx,
+                        int y1, int brows, int bandcolors, const uint8_t *idx,
                         const A5Color *pal)
 {
     int nb = a5v_nbands(brows, y0, y1);
@@ -535,15 +543,27 @@ static void write_still(const char *out, int planes, int ncolors, int y0,
     a5buf_init(&file);
     a5_delta_encode(&delta, black, idx, planes, &ds);
 
-    raw = 6 + (size_t)nb * ncolors * 2 + delta.len;
+    raw = 6 + (size_t)a5v_palette_words(ncolors, nb, bandcolors) * 2
+        + delta.len;
     plen = (raw + 1) & ~(size_t)1;
     a5v_put_header(&file, planes, ncolors, A5V_AUDIO_NONE, 0, y0, y1, brows,
-                   1, (uint32_t)plen);
+                   bandcolors, 1, (uint32_t)plen);
     a5buf_put16(&file, (unsigned)plen);
     a5buf_put8(&file, A5V_OP_DELTA);
     a5buf_put8(&file, A5V_F_PALETTE);
     a5buf_put16(&file, 0);
-    for (c = 0; c < nb * ncolors; c++) a5buf_put16(&file, pal[c]);
+    for (c = 0; c < ncolors; c++) a5buf_put16(&file, pal[c]);
+    for (b = 1; b < nb; b++) {               /* lo que cambia por franja */
+        int k = 0;
+        for (c = 1; c < ncolors && k < bandcolors; c++)
+            if (pal[b * ncolors + c] != pal[(b - 1) * ncolors + c]) {
+                a5buf_put16(&file, (unsigned)c);
+                a5buf_put16(&file, pal[b * ncolors + c]);
+                k++;
+            }
+        for (; k < bandcolors; k++) { a5buf_put16(&file, 0);
+                                      a5buf_put16(&file, 0); }
+    }
     a5buf_write(&file, delta.p, delta.len);
     if (raw != plen) a5buf_put8(&file, 0);
 
@@ -611,6 +631,7 @@ int main(int argc, char **argv)
     const uint8_t *p, *end;
     int planes, ncolors, w, h, y0, y1, afmt, aper;
     int brows, nbands, npalw;          /* franjas de paleta */
+    int bandcolors, npals;             /* pares por franja, y estado entero */
     int8_t *asamples = NULL;
     size_t nasamples = 0;
     char wavpath[1024];
@@ -680,10 +701,13 @@ int main(int argc, char **argv)
 
     brows  = data[A5V_HDR_BANDROWS];
     nbands = a5v_nbands(brows, y0, y1);
-    npalw  = nbands * ncolors;
+    bandcolors = data[A5V_HDR_BANDCOLORS];
     if (nbands > A5_MAX_BANDS) die("demasiadas franjas");
-    if (nbands > 1 && planes > 3)
-        die("franjas con mas de 3 planos: el Copper no llega (FORMAT.md)");
+    if (nbands > 1 && (bandcolors < 1 || bandcolors >= ncolors))
+        die("colores por franja invalidos (1..colores-1)");
+    if (nbands == 1) bandcolors = 0;
+    npalw  = a5v_palette_words(ncolors, nbands, bandcolors);
+    npals  = nbands * ncolors;
 
     printf("bitstream  : %s (%lu bytes)\n", in, (unsigned long)len);
     printf("             %dx%d, %d planos, %d colores, filas activas %d..%d\n",
@@ -775,12 +799,24 @@ int main(int argc, char **argv)
         pkend = p + plen;
 
         if (flags & A5V_F_PALETTE) {
-            int c;
+            int c, b;
+            const uint8_t *q = pk;
+
             if (pkend - pk < npalw * 2) die("paleta incompleta");
-            for (c = 0; c < npalw; c++) pal[c] = (A5Color)be16(pk + c * 2);
-            for (c = 1; c < nbands; c++)
-                if (pal[c * ncolors] != pal[0])
-                    die("el color 0 cambia entre franjas (FORMAT.md)");
+            for (c = 0; c < ncolors; c++) pal[c] = (A5Color)be16(q + c * 2);
+            q += ncolors * 2;
+            /* Cada franja hereda la de arriba y aplica sus pares
+             * (indice, color); el indice 0 es relleno (FORMAT.md). */
+            for (b = 1; b < nbands; b++) {
+                memcpy(pal + b * ncolors, pal + (b - 1) * ncolors,
+                       (size_t)ncolors * sizeof *pal);
+                for (c = 0; c < bandcolors; c++, q += 4) {
+                    unsigned i = be16(q);
+                    if (i >= (unsigned)ncolors)
+                        die("indice de color fuera de la paleta");
+                    if (i) pal[b * ncolors + i] = (A5Color)be16(q + 2);
+                }
+            }
             pk += npalw * 2;
             npal++;
         }
@@ -861,7 +897,7 @@ int main(int argc, char **argv)
 
         if (crcdata) {
             uint32_t want = be32(crcdata + n * 4);
-            uint32_t got  = frame_crc(idxbuf, fsz, pal, npalw);
+            uint32_t got  = frame_crc(idxbuf, fsz, pal, npals);
             if (want != got) {
                 if (bad < 5)
                     fprintf(stderr, "frame %lu: crc %08lX, el encoder decia "
@@ -873,8 +909,8 @@ int main(int argc, char **argv)
 
         if (still_k >= 0 && (long)n == still_k) {
             if (!still_out) die("--still necesita --still-out");
-            write_still(still_out, planes, ncolors, y0, y1, brows, idxbuf,
-                        pal);
+            write_still(still_out, planes, ncolors, y0, y1, brows,
+                        bandcolors, idxbuf, pal);
         }
 
         p = pkend;
@@ -884,7 +920,7 @@ int main(int argc, char **argv)
 
     if (still_check &&
         !check_still(still_check, fb[visible], planes, brows, y0, y1, pal,
-                     delta_used))
+                     bandcolors, delta_used))
         return 1;
 
     printf("\npaquetes   : %lu (%d delta, %d repeticion, %d paletas)\n",
