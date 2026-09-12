@@ -40,24 +40,34 @@
 #define A5V_DEFAULT_BUDGET  (901120 - 1024 - 16384)
 
 /* --- modelo de costo de decodificacion ---------------------------------
- * CALIBRADO en el Hito 4 (2026-09-11). El disco de medicion cronometro con
- * el haz de video los 253 deltas de final22.a5v, en WinUAE A500 68000
+ * CALIBRADO en el Hito 4 (2026-09-11) y RECALIBRADO en el H10 (2026-09-12),
+ * cuando el decodificador del reproductor se desenrollo. El disco de
+ * medicion cronometra con el haz de video cada delta, en WinUAE A500 68000
  * cycle-exact con 3 bitplanes en pantalla. Minimos cuadrados:
  *
- *   ciclos = 5580 + 851,6 x filas + 177,5 x columnas
- *            (R2 = 1,0000, residuo maximo 0,14 ms)
+ *   Hito 4:  ciclos = 5580 + 851,6 x filas + 177,5 x columnas
+ *                     (253 deltas de final22.a5v, R2 = 1,0000)
+ *   H10:     ciclos =  -1243 + 900,5 x filas + 126,6 x columnas
+ *                     (233 deltas de fmab_op.a5v, R2 = 0,9910)
  *
  * La fila cara es el recorrido de los 20 bits de la mascara de columnas:
- * ~36 ciclos por columna, este marcada o no. Por columna marcada, lo que se
- * midio es la suma de la columna y sus 3 bytes; el reparto entre las dos
- * (22 + 3 x 52) sale de contar instrucciones, no de la medicion. Con otra
- * cantidad de planos hay que volver a medir.
+ * ~36 ciclos por columna, este marcada o no. El H10 saltea 8 columnas de
+ * una cuando el byte de mascara es cero, pero en material real las filas
+ * marcadas son densas y casi nunca dispara: el costo por fila hasta subio
+ * un poco (los dos cmp.l del atajo). Lo que si bajo mucho es la columna,
+ * de 177,5 a 126,6, por desenrollar la escritura de planos (se fueron el
+ * dbf y el lea de cada plano).
+ *
+ * Por columna marcada lo medido es la suma de la columna y sus 3 bytes; el
+ * reparto entre las dos (19 + 3 x 36) sale de contar instrucciones, no de
+ * la medicion. El intercepto del ajuste dio negativo, que es un artefacto:
+ * se usa 0. Con 4 planos se midio aparte (ver DECISIONS.md).
  */
 #define A5_CPU_HZ            7093790.0
-#define A5_CYC_FRAME         5580
-#define A5_CYC_ROW           852
-#define A5_CYC_COL           22
-#define A5_CYC_BYTE          52
+#define A5_CYC_FRAME         0
+#define A5_CYC_ROW           900
+#define A5_CYC_COL           19
+#define A5_CYC_BYTE          36
 #define A5_FRAME_BUDGET_CYC  ((long)(A5_CPU_HZ * 0.040))
 #define A5_CYC_PER_VBL       (A5_CPU_HZ / A5_VBL_HZ)   /* ~142103 */
 
