@@ -877,11 +877,16 @@ int main(int argc, char **argv)
         printf("             cadencia pal: %.3f s de fuente en %.3f s, "
                "%.2f%% mas rapido\n", nsrc / src.fps, nframes / A5_VIDEO_FPS,
                (A5_VIDEO_FPS / src.fps - 1) * 100);
-    else
+    else {
+        /* Una fuente mas rapida que 24,96 fps no repite frames: descarta.
+         * La resta sin signo informaba "4294967295 frames repetidos". */
+        long extra = (long)nframes - (long)nsrc;
         printf("             cadencia native: %.3f s de fuente en %.3f s, "
-               "%lu frames repetidos, audio intacto\n",
+               "%ld frames %s, audio intacto\n",
                nsrc / src.fps, nframes / A5_VIDEO_FPS,
-               (unsigned long)(nframes - nsrc));
+               extra < 0 ? -extra : extra,
+               extra < 0 ? "descartados" : "repetidos");
+    }
 
     /* --- audio -------------------------------------------------------
      * Va dentro de los paquetes, asi que el presupuesto es uno solo: cabecera
