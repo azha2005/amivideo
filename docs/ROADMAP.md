@@ -112,9 +112,18 @@ pantalla completa, lo mas caro que hay. El Blitter tiene barrel shifter de
 Opcode nuevo: "corre el buffer (dx, dy) y despues aplica este delta chico"
 para el borde que quedo al descubierto.
 
-- **Ganancia estimada, a medir:** en planos con paneo, un orden de magnitud
-  menos de bytes y de tiempo. En `btf.mp4` hay paneos; es el material
-  ideal para medirlo.
+- **MEDIDO el 2026-09-12, y el resultado da vuelta este hito.** El vector
+  de movimiento **no sirve**: sobre `btf.mp4` ahorra 72 bytes en todo el
+  video (0,01 %) y solo 36 de 495 deltas eligen un vector distinto de cero.
+  A 160 px de ancho un paneo es casi siempre sub-pixel, y lo que se compara
+  son indices de paleta, que no se conservan al correr la imagen.
+- **Lo que si sirve es la mitad trivial:** predecir el delta desde el
+  buffer **visible** en vez del oculto (80 ms de movimiento en vez de 160)
+  ahorra **21,4 %** de bytes, y con eso `--min-hold 1` entra: el error
+  contra la fuente pasa de 6,61 % a **2,18 %**. La copia con el Blitter
+  cuesta **6,7 ms** con nasty (medido). Ver `DECISIONS.md`.
+- **El hito queda redefinido:** opcode opcional por frame "copia + delta",
+  sin estimacion de movimiento.
 - **Trabajo:** estimacion de movimiento en el encoder (busqueda de bloque
   simple sobre el frame ya escalado) y el opcode en el reproductor.
 - **Ojo:** el Blitter compite por ciclos de DMA con los bitplanes. Con 4

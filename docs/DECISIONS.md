@@ -1313,6 +1313,48 @@ encoder ya simula la linea de tiempo, asi que puede elegir por frame entre
 
 ---
 
+## 2026-09-12 — H12: cuanto cuesta la copia con el Blitter, medido
+
+**Metodo:** el disco de medicion, al terminar la reproduccion y **con la
+imagen todavia en pantalla**, copia 16 veces el area activa de un
+framebuffer al otro con el Blitter (un blit por plano, A → D, minterm $F0)
+y lo cronometra con el haz. Con la imagen puesta el Blitter compite por los
+slots de DMA con los bitplanes, que es la condicion real; y la CPU se queda
+esperandolo con `btst #6,DMACONR`, que tambien es el caso real, porque el
+delta escribe en el mismo buffer. WinUAE A500 68000 cycle-exact, KS 1.2,
+`btf_final.a5v`: 4 planos, 94 filas activas.
+
+| | media | peor | ciclos de CPU |
+|---|---|---|---|
+| Blitter normal | 8,814 ms | 10,191 ms | 62 527 |
+| Blitter **nasty** (`BLTPRI`) | **6,685 ms** | 7,358 ms | 47 422 |
+
+**Nasty sale gratis y conviene.** Le da al Blitter prioridad sobre la CPU,
+que normalmente seria malo, pero aca la CPU no tiene nada que hacer: lo
+esta esperando. Ahorra un 24 %.
+
+Por palabra copiada son ~3,2 color clocks con nasty (el minimo teorico son
+2), o sea ~126 ciclos de CPU por plano y por fila. Para 3 planos y 96 filas
+la copia saldria ~36 300 ciclos = 5,1 ms.
+
+**Con esto, la idea cierra.** Con `--min-hold 1` el presupuesto por delta
+es 40,06 ms. Un delta tipico con prediccion desde el visible son ~938 bytes
+(~234 columnas con 4 planos), o sea ~10,6 ms, mas 6,7 de copia: **17 ms de
+40**. El caso que no entra es el corte de escena (pantalla completa, 56 ms),
+pero justamente ahi predecir desde el visible no sirve de nada y el encoder
+no tiene que pedir la copia.
+
+**Confirma la decision de diseno:** la copia va como **opcode opcional por
+frame**, no como cambio global. El encoder ya simula la linea de tiempo;
+con esta constante puede elegir por frame entre "delta" y "copia + delta"
+mirando bytes y milisegundos.
+
+**Falta:** meter la constante en el modelo (`A5_CYC_BLIT`, ~126 ciclos por
+plano y por fila con nasty), hacer la eleccion por frame, y recien despues
+el formato nuevo y el reproductor.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
