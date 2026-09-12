@@ -291,7 +291,7 @@ switch ($Task) {
             '--boot',   (Join-Path $work 'boot.bin'),
             '--player', (Join-Path $work 'still.bin'),
             '--data',   $still,
-            '--reserve-tail', '80',
+            '--reserve-tail', '100',
             '--out',    $adf)
 
         $r = Start-Emulator -Headless -AdfPath $adf

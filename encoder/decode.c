@@ -371,8 +371,8 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
  * Vuelca el framebuffer, el copper list y un sector de informacion (formato
  * en FORMAT.md). --check-still los compara byte por byte con lo que tendria
  * que haber armado el reproductor. */
-#define STILL_FB_SECTOR    1680
-#define STILL_COP_SECTOR   1720
+#define STILL_FB_SECTOR    1660     /* 50 sectores: 5 planos x 5120 bytes */
+#define STILL_COP_SECTOR   1710
 #define STILL_INFO_SECTOR  1759
 #define STILL_COP_MAX      8192     /* COPPER_SIZE de player\video.i */
 #define DIW_FIRST          0x2c     /* primera linea de pantalla */

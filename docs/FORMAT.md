@@ -32,7 +32,7 @@ no es un volumen valido y esta bien.
 | 0–1 | Bootblock (1024 bytes) |
 | 2 … | Reproductor, en sectores consecutivos |
 | siguiente al reproductor … | Datos: bitstream (cabecera + paquetes) |
-| 1680–1735 | Solo en discos de prueba: volcado del framebuffer y del copper list (Hito 3) |
+| 1660–1725 | Solo en discos de prueba: volcado del framebuffer y del copper list (Hito 3) |
 | 1754–1758 | Solo en discos de medicion: tiempos de decodificacion (Hito 4) |
 | 1759 | Solo en discos de prueba: sector de informacion (`MEMR`, `FBDM` o `PLAY`) |
 
@@ -287,18 +287,18 @@ consecuencias: el codigo de error de trackdisk se muestra en pantalla como
 
 ---
 
-## Volcado del Hito 3 (sectores 1680–1759)
+## Volcado del Hito 3 (sectores 1660–1759)
 
 Lo escribe el reproductor de prueba (`player\still.s`) despues de
 decodificar el primer paquete y armar su copper list, y antes de tomar el
 hardware, con `CMD_WRITE` + `CMD_UPDATE`.
 
-**Sectores 1680 en adelante:** el framebuffer tal cual esta en Chip RAM:
+**Sectores 1660 en adelante:** el framebuffer tal cual esta en Chip RAM:
 `bitplanes` x 5120 bytes (40 bytes por fila de pantalla x 128 filas), plano
 0 primero. Son los bytes logicos ya doblados por la tabla. Con 3 planos
-ocupa los sectores 1680–1709; con 4, hasta el 1719.
+ocupa los sectores 1660–1689; con 5, hasta el 1709.
 
-**Sectores 1720–1735:** el copper list, 8192 bytes (lo que se reserva; lo
+**Sectores 1710–1725:** el copper list, 8192 bytes (lo que se reserva; lo
 que importa es el principio, hasta el `$FFFFFFFE` final).
 
 **Sector 1759:**

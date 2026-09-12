@@ -19,8 +19,9 @@
         include "exec.i"
         include "video.i"
 
-DUMP_SECTOR   equ 1680                ; volcado del framebuffer (hasta 40 sect.)
-COPDUMP_SECTOR equ 1720               ; volcado del copper list (16 sectores)
+DUMP_SECTOR   equ 1660                ; volcado del framebuffer (hasta 50 sect.
+                                      ; = 5 planos x 5120 bytes)
+COPDUMP_SECTOR equ 1710               ; volcado del copper list (16 sectores)
 INFO_SECTOR   equ 1759
 
 COL_LOAD      equ $0f80               ; naranja: cargando
