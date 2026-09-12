@@ -32,7 +32,14 @@ BAR_LINES     equ 192
 COL_BAR       equ $0036
 
 TIMING_SECTOR equ 1754                ; tabla de tiempos, 5 sectores
-TIMING_MAX    equ 640                 ; paquetes que entran en la tabla
+TIMING_MAX    equ 512                 ; paquetes que entran en la tabla.
+                                      ; Multiplo de 128: trackdisk exige
+                                      ; longitudes multiplo de 512 y la
+                                      ; tabla se graba entera (con 576 daba
+                                      ; IOERR_BADLENGTH). Bajo de 640 porque
+                                      ; el decodificador desenrollado del H10
+                                      ; agrando el reproductor y el stream
+                                      ; del Hito 6 no entraba.
 INFO_SECTOR   equ 1759
 
 AUD_SAMPLES   equ 512                 ; muestras por buffer de Paula (64 ms)
