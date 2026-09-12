@@ -1355,6 +1355,76 @@ el formato nuevo y el reproductor.
 
 ---
 
+## 2026-09-12 — 5 bitplanes: 32 colores, implementado y medido
+
+**Por que se reabrio.** Az insistio en que a su ojo mas colores es mas
+calidad que mas fps, y tenia razon en algo que la metrica no ve: el
+*banding* en un degradado son muchos pixeles apenas corridos, todos por
+debajo del umbral de 0,1, asi que el "% de pixeles lejos de la fuente" no
+lo cuenta. El ojo en cambio ve el **borde** entre dos escalones, que es una
+linea larga y coherente.
+
+**Simulacion honesta primero** (`encoder/ehbtest.c`, fuera del build): el
+mismo frame a la geometria real del video (160x96 logicos), con el k-means
+en Oklab y el redondeo a RGB444 del proyecto:
+
+| | error medio |
+|---|---|
+| 16 colores (4 planos) | 0,0269 |
+| **32 colores (5 planos)** | **0,0202** |
+| 64 EHB (32 + sus mitades) | 0,0192 |
+| 64 libres (no existen en OCS) | 0,0172 |
+
+Dos cosas: **EHB se queda con el 78 % de lo que darian 64 colores libres**
+(la restriccion del hardware sale barata), y **32 colores ya capturan el
+86 % de lo que da EHB**, por la mitad del sobrecosto. Mirando las imagenes,
+con 16 el cielo tiene tres escalones con bordes duros; con 32 casi
+desaparecen.
+
+**Implementacion:** `A5_MAX_COLORS` 16 → 32, `A5_MAX_PLANES` 4 → 5,
+`--planes` acepta 5, y el reproductor gana una instancia mas de la macro
+`DELTA_ROWS`. Con 5 planos no hay franjas de paleta (ya se apagaban solas
+con mas de 3).
+
+**Medido con el encoder real** (btf, `--sharpen 0 --min-hold 2`):
+
+| | cuantizacion | sin perdida | vs. fuente |
+|---|---|---|---|
+| 4 planos, 13 s | 0,0263 | 816 590 | 6,61 % |
+| **5 planos, 13 s** | 0,0212 | 1 017 266 | **12,10 %** |
+| 4 planos, 10 s | | 621 440 | 6,12 % |
+| **5 planos, 10 s** | | 774 412 | **5,28 %** |
+| 5 planos, 11 s | | 839 928 | 5,09 % |
+| 5 planos, 13 s + prediccion (H12) | | 797 234 | **5,81 %** |
+
+**El resultado importa y es contraintuitivo: a 13 s, 5 planos es peor que
+4** (12,10 % contra 6,61 %). El color mejora lo previsto, pero el stream se
+va a 1,02 MB contra 883 KB de disco y el control de tasa tiene que meter
+perdida, que cuesta mas de lo que el color gana.
+
+**A igual duracion, 5 planos gana claro** (5,28 % contra 6,12 % a 10 s). Y
+con la prediccion desde el visible del H12, entra a 13 s con 5,81 %: se
+queda con los segundos **y** con el color.
+
+**Conclusion: 5 planos solo conviene con H12 hecho, o acortando a ~11 s.**
+
+**Costo de decodificacion:** el peor delta pasa de 55,1 ms (4 planos) a
+64,7 ms, contra los 80 ms que da `--min-hold 2`. Entra, pero el margen para
+la copia del Blitter (8,5 ms con 5 planos) queda justo.
+
+**Verificacion byte a byte** con el disco de frame fijo, en las tres
+cantidades de planos: 3 (con franjas) 15 360 bytes, 4 (20 480) y 5
+(25 600), todos identicos al decoder de referencia, y el delta consumiendo
+exactamente los bytes esperados.
+
+**Bug del arnes, no del reproductor.** La primera corrida con 5 planos dio
+1997 bytes distintos a partir del offset 20480. El volcado del disco de
+prueba reservaba los sectores 1680–1719, o sea 40 sectores = 20 480 bytes =
+exactamente 4 planos: el plano 4 se escribia encima del volcado del copper
+list. La zona pasa a 1660–1709 (50 sectores) y el copper a 1710.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
