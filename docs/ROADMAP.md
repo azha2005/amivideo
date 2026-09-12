@@ -102,7 +102,7 @@ con distinto canje:
   del reproductor** (Hito 4). Se extiende para elegir por frame entre los
   tres opcodes mirando bytes **y** milisegundos.
 
-### H12 — Vector de movimiento global y copia desplazada por Blitter
+### H12 — Copia del buffer visible con el Blitter  **[HECHO 2026-09-12]**
 
 El candidato con mas potencial para imagen real. En un paneo de camara la
 imagen entera se corre unos pixeles: hoy eso se codifica como un delta de
@@ -122,12 +122,19 @@ para el borde que quedo al descubierto.
   ahorra **21,4 %** de bytes, y con eso `--min-hold 1` entra: el error
   contra la fuente pasa de 6,61 % a **2,18 %**. La copia con el Blitter
   cuesta **6,7 ms** con nasty (medido). Ver `DECISIONS.md`.
-- **El hito queda redefinido:** opcode opcional por frame "copia + delta",
+- **El hito quedo redefinido:** flag opcional por frame "copia + delta",
   sin estimacion de movimiento.
-- **Trabajo:** estimacion de movimiento en el encoder (busqueda de bloque
-  simple sobre el frame ya escalado) y el opcode en el reproductor.
-- **Ojo:** el Blitter compite por ciclos de DMA con los bitplanes. Con 4
-  planos en lowres quedan slots libres, pero hay que medirlo, no suponerlo.
+- **HECHO el 2026-09-12** (formato v5, bit 1 de los flags del paquete). El
+  encoder codifica las dos variantes por frame y elige mirando bytes y
+  milisegundos; el reproductor copia con un blit A -> D por plano en nasty.
+  Verificado byte a byte contra el decoder de referencia con el CRC de los
+  dos framebuffers despues de 151 copias.
+- **El Blitter si compite con los bitplanes, y se midio:** 126 ciclos por
+  plano y por fila con 4 planos, 130 con 5. Con 5 planos la copia del area
+  activa son 8,8 ms de los 80 que da --min-hold 2.
+- **Resultado:** con 5 planos a 13 s el error contra la fuente pasa de
+  12,10 % a **5,89 %**; con 4 planos y --min-hold 1, a **2,81 %**. Los
+  numeros y el detalle, en `DECISIONS.md`.
 
 ---
 
@@ -185,8 +192,10 @@ huecos). Subir la cadencia a 24,96 fps lo lleva a 2,70 %; mas colores
 compraria unas 3 decimas. Ademas 6 planos cuestan 1,5x en bytes y en
 tiempo, y cierran la puerta a min-hold 1. Ver `DECISIONS.md`.
 
-**Hacer H12 primero.** Lo que sigue queda para despues, y solo si sobra
-presupuesto.
+**H12 ya esta hecho** (2026-09-12) y libero justo el presupuesto que hacia
+falta: con 5 planos (32 colores) el video de prueba entra a 13 s con 5,89 %
+de error, y sobran 83 KB de disco. Lo que sigue es el paso siguiente de
+color, y ahora si hay lugar para discutirlo.
 
 ### H16 — HAM6 para material lento
 

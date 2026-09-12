@@ -1425,6 +1425,80 @@ list. La zona pasa a 1660–1709 (50 sectores) y el copper a 1710.
 
 ---
 
+## 2026-09-12 — H12 hecho: la copia del visible, medida y verificada
+
+**Que se implemento.** Formato v5, bit 1 de los flags del paquete: antes
+de aplicar el delta, copiar el area activa del buffer visible al oculto.
+El delta entonces predice desde el ultimo frame distinto (80 ms) en vez
+del penultimo (160 ms con `--min-hold 2`). El encoder codifica las **dos**
+variantes por frame y elige mirando bytes y milisegundos (`--predict
+auto`); el reproductor copia con un blit A -> D por plano y espera al
+Blitter con `BBUSY`. `BLTPRI` (nasty) queda encendido toda la
+reproduccion: mientras copia, la CPU solo lo espera.
+
+El vector de movimiento global que este hito proponia **no se
+implemento**: medido el mismo dia, ahorraba 72 bytes en todo el video.
+
+**Lo que gana, con el encoder real** (btf, 13 s, `--sharpen 0`):
+
+| | vs. fuente, sin H12 | con H12 |
+|---|---|---|
+| 4 planos, `--min-hold 2` | 6,61 % | 6,61 % (el disco ya no era el limite: sobran 242 KB) |
+| **5 planos, `--min-hold 2`** | 12,10 % | **5,89 %** |
+| **4 planos, `--min-hold 1`** | no entraba | **2,81 %** |
+
+O sea: H12 no mejora el caso que ya entraba holgado; **hace entrar los dos
+que no entraban**. Con 5 planos el stream sin perdida pasa de 1,02 MB a
+797 KB y deja de necesitar perdida; con `--min-hold 1` la cadencia completa
+(24,96 fps) entra con 24 KB de sobra. 149 de 165 deltas piden la copia; los
+16 que no son los cortes de escena, donde el visible no predice nada.
+
+**Verificacion byte a byte de toda la reproduccion, no de un frame.** El
+unico control exacto que habia era el disco de frame fijo: un delta desde
+negro, que no pasa por el doble buffer ni por ninguna copia. Ahora el
+reproductor de medicion calcula el CRC32 de los dos framebuffers tal como
+quedaron en Chip y lo deja en el sector de informacion; `a500vp-dec
+--measure` calcula el mismo sobre los suyos (doblando cada byte logico) y
+falla si no coincide.
+
+- btf, 5 planos, 13 s, **151 copias**: `3DFB25DC` y `C01DCA3A` en la Amiga
+  y en el decoder de referencia. Identicos.
+- Y el disco de frame fijo sigue dando 25 600 bytes identicos con 5 planos.
+
+**Lo que costo, medido en el propio lazo de reproduccion** (no en un banco
+sintetico como la vez anterior): 151 copias, **9,259 ms de media**, la peor
+14,885 ms. De ahi hay que descontar los llenados de audio que caen dentro
+de la espera, que la linea de tiempo ya cuenta aparte: si un llenado
+(5,04 ms) cae con probabilidad copia/64 ms, la copia pura queda en 8,58 ms
+= **130 ciclos por plano y por fila** con 5 planos (126 con 4, medido antes
+sin audio). La peor copia es justo una con un llenado adentro.
+
+**El bug que encontro esta medicion, y no era el H12.** La primera corrida
+con 5 planos dio 33 frames tarde donde el modelo preveia 12, y el peor
+delta 84,0 ms contra 73,7 previstos: el modelo predecia el 90 % de lo
+medido. La causa es que `A5_CYC_BYTE` se habia calibrado con 3 y 4 planos.
+En lowres el DMA de bitplanes usa slots que con 4 planos o menos le sobran
+a la CPU, y **con 5 se los empieza a sacar**:
+
+| planos en pantalla | ciclos por byte | por columna (modelo) | medido |
+|---|---|---|---|
+| 3 | 36 | 127 | 126,6 |
+| 4 | 36 | 163 | 168,5 |
+| **5** | **43** | **234** | **235,6** |
+
+Con el byte a 43 el modelo pasa a predecir el **99,1–99,4 %** de lo medido
+y el peor frame 83,0 ms contra 83,6 reales. Es la tercera vez que el modelo
+de costo hay que recalibrarlo despues de cambiar algo: **ninguna cifra del
+modelo vale para una cantidad de planos que no se midio.**
+
+**Estado final con 5 planos a 13 s** (`h12b_p5_mh2.a5v`, medido en WinUAE):
+648 VBL para 648 esperados, 30 frames tarde el peor por 2 VBL, audio con
+0,10 ms de deriva en 13 s, carga 797 KB en 43,3 s a 18,0 KB/s. El peor
+delta real es 83,6 ms contra los 80 que da `--min-hold 2`: por eso quedan
+esos frames tarde, y el reproductor los absorbe con las repeticiones.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
