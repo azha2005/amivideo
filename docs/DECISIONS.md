@@ -1694,6 +1694,93 @@ Sin cambios en btf (5,89 % antes y despues): ahi la busqueda ya caia bien.
 
 ---
 
+## 2026-09-12 — Franjas parciales de paleta con 32 colores (formato v6)
+
+**Implementado.** Cada franja **hereda** la paleta de la de arriba y cambia
+como mucho `band_colors` entradas; el paquete lleva esos cambios como pares
+(indice, color) y el reproductor los convierte en un `MOVE` del Copper cada
+uno, en el borde horizontal de la primera linea de la franja. Las ranuras
+que sobran van con indice 0 y se escriben como `MOVE` al registro `$01FE`,
+que no hace nada. Con `band_colors = colores - 1` sale exactamente el
+comportamiento de las franjas de 8 colores de antes.
+
+Esto saca la restriccion de "franjas solo con 3 planos o menos": ahora hay
+franjas con 32 colores.
+
+**La cuenta de slots del Copper, corregida.** La entrada del dia decia 9
+MOVE, contando desde el principio de la linea. Estaba mal medida la ventana:
+el WAIT de la franja despierta en el **color clock 6**, no en el 0, y la
+imagen empieza en el 64 (DIWSTRT $2C81 = 129 pixeles lores). Son 58 color
+clocks, a 4 por MOVE = **14 MOVE**, de los cuales 2 se van en los modulos
+del doblado vertical: **12 colores**, menos lo que roben el refresco y el
+audio en esa ventana. El encoder usa 8, con margen.
+
+**Y el dato que importa: el material no llega ni cerca de ese tope.** Con
+la paleta heredada, la busqueda encuentra que cambiar mas de 6 colores por
+franja ya no baja el error:
+
+| | colores cambiados por franja |
+|---|---|
+| btf, franjas de 8 filas | 4,7 |
+| btf, franjas de 16 filas | 5,8 |
+| btf, franjas de 32 filas | 6,8 |
+| melissa, franjas de 8 filas | 3,9 |
+
+Con `--band-colors 16` o `24` el promedio se queda en 6,1: **la ventana del
+Copper no es la restriccion**. Por eso no hizo falta medir el tope exacto
+con el haz: esta lejos.
+
+(Intento fallido, vale anotarlo: se hicieron discos de prueba con
+`--band-colors 24` esperando ver el retraso en pantalla. No se ve, y no
+porque el Copper llegue: los cambios **reales** van primero en la lista y el
+relleno despues, asi que lo unico que llega tarde son los `MOVE` que no
+hacen nada.)
+
+**Lo que gana** (13 s, 5 planos, `--predict auto`):
+
+| | error de cuantizacion | vs. fuente |
+|---|---|---|
+| btf, sin franjas | 0,0212 | 5,89 % |
+| btf, franjas de 32 filas | 0,0206 | 5,78 % |
+| btf, franjas de 16 filas | 0,0205 | 5,80 % |
+| **btf, franjas de 8 filas** | **0,0201** | **5,77 %** |
+| melissa, sin franjas | 0,0204 | 6,30 % |
+| **melissa, franjas de 8 filas** | **0,0196** | **6,19 %** |
+
+**Menos de lo que prometia la simulacion, y por una razon concreta.**
+`bandtest` daba −9 % de error de cuantizacion sobre un frame suelto; lo real
+es −5 %. La diferencia es que en el formato **la paleta es por escena, no
+por frame**: el histograma de una franja a lo largo de toda una escena es
+mucho mas parecido al de las otras franjas que en un frame solo, sobre todo
+con la camara moviendose. Franjas mas finas (8 filas) recuperan algo.
+
+**Cuesta casi nada:** cero bytes en los deltas, ~2 KB mas de paletas en todo
+el video (los pares de las franjas), cero tiempo de decodificacion (lo hace
+el Copper) y 160 bytes mas de copper list.
+
+**Verificado byte a byte:**
+
+- Decoder de referencia contra el encoder: los 324 frames coinciden, con
+  franjas de 8, 16 y 32 filas.
+- Disco de frame fijo en la Amiga (5 planos, 6 franjas, 8 colores por
+  franja): framebuffer 25 600 bytes identico y **copper list 3444 bytes
+  identico** al que arma el decoder de referencia. Tambien con
+  `--band-colors 16` (3604 bytes) y `24` (3764).
+- Regresion del Hito 6 (3 planos, franjas de 16 filas): el encoder anterior
+  y el nuevo dan exactamente el mismo error de cuantizacion (0,0321) y el
+  mismo error contra la fuente (7,53 %).
+
+**Bug encontrado al verificar, y el que se agrego para que no vuelva.** La
+primera version daba 105 frames de 324 distintos en el decoder. El motivo:
+el `band-snap` del Hito 6 seguia corriendo **despues** de elegir los
+cambios, y mover una entrada mas de las que el paquete puede llevar hace que
+el reproductor muestre una paleta distinta de la que simulo el encoder. En
+el camino que hereda, el snap va sobre las **candidatas**, no sobre la
+paleta ya armada. Ademas, `put_packet` ahora **aborta** si una franja cambia
+mas colores de los que entran, en vez de truncar en silencio.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
