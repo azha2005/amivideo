@@ -35,15 +35,40 @@ build_table:
 ; columnas y, por columna marcada, un byte por plano. Cada byte logico se
 ; escribe como una palabra en pantalla, via la tabla.
 ;----------------------------------------------------------------------
-apply_delta:
-        movem.l d0-d7/a1/a4-a6,-(sp)
-        lea     16(a0),a4                     ; a4 = datos de las filas
-        move.l  a2,a5                         ; a5 = fila actual, plano 0
+; DELTA_COLS \1 - un grupo de d1+1 columnas, con los \1 planos
+; desenrollados. Desenrollar saca el dbf y el lea de cada plano (~22 ciclos
+; por plano y por columna marcada), que son el grueso de los 177,3 ciclos
+; por columna que midio el Hito 4. El desplazamiento del plano entra en los
+; 16 bits de d16(An), asi que la escritura va directo sin mover a1.
+DELTA_COLS  macro
+.col\@: add.l   d2,d2
+        bcc.s   .skip\@
+        move.l  a6,a1
+adp_n   set     0
+        rept    \1
+        moveq   #0,d7
+        move.b  (a4)+,d7
+        add.w   d7,d7
+        move.w  0(a3,d7.w),adp_n*PLANE_BYTES(a1)
+adp_n   set     adp_n+1
+        endr
+.skip\@:
+        addq.l  #2,a6
+        dbf     d1,.col\@
+        endm
+
+; DELTA_ROWS \1 - el lazo de filas para una cantidad fija de planos.
+; Las 20 columnas se recorren en dos grupos de 8 y uno de 4: si los 8 bits
+; de arriba de la mascara estan en cero se saltan las 8 columnas de una,
+; en vez de pagar ~36 ciclos por columna caminando bits (720 por fila).
+DELTA_ROWS  macro
         moveq   #15,d5                        ; 16 bytes de mapa de filas
-.mbyte: move.b  (a0)+,d4
+.mbyte\@:
+        move.b  (a0)+,d4
         moveq   #7,d3
-.mbit:  add.b   d4,d4                         ; bit 7 = fila de mas arriba
-        bcc.s   .nextrow
+.mbit\@:
+        add.b   d4,d4                         ; bit 7 = fila de mas arriba
+        bcc     .nextrow\@
 
         moveq   #0,d2                         ; d2 = mascara: b0 b1 b2 00
         move.b  (a4)+,d2
@@ -54,6 +79,55 @@ apply_delta:
         lsl.w   #8,d2
 
         move.l  a5,a6                         ; a6 = columna 0 de la fila
+        cmp.l   #$00ffffff,d2                 ; primeras 8 sin marcar?
+        bhi.s   .g1\@
+        lsl.l   #8,d2
+        lea     16(a6),a6
+        bra.s   .g1end\@
+.g1\@:  moveq   #7,d1
+        DELTA_COLS  \1
+.g1end\@:
+        cmp.l   #$00ffffff,d2                 ; segundas 8 sin marcar?
+        bhi.s   .g2\@
+        lsl.l   #8,d2
+        lea     16(a6),a6
+        bra.s   .g2end\@
+.g2\@:  moveq   #7,d1
+        DELTA_COLS  \1
+.g2end\@:
+        moveq   #3,d1                         ; las ultimas 4
+        DELTA_COLS  \1
+
+.nextrow\@:
+        lea     FB_ROWBYTES(a5),a5
+        dbf     d3,.mbit\@
+        dbf     d5,.mbyte\@
+        endm
+
+apply_delta:
+        movem.l d0-d7/a1/a4-a6,-(sp)
+        lea     16(a0),a4                     ; a4 = datos de las filas
+        move.l  a2,a5                         ; a5 = fila actual, plano 0
+        cmp.w   #3,d6                         ; los dos casos que se usan
+        beq     .three
+        cmp.w   #4,d6
+        beq     .four
+
+        moveq   #15,d5                        ; generico: 1 o 2 planos
+.mbyte: move.b  (a0)+,d4
+        moveq   #7,d3
+.mbit:  add.b   d4,d4
+        bcc.s   .nextrow
+
+        moveq   #0,d2
+        move.b  (a4)+,d2
+        lsl.w   #8,d2
+        move.b  (a4)+,d2
+        swap    d2
+        move.b  (a4)+,d2
+        lsl.w   #8,d2
+
+        move.l  a5,a6
         moveq   #19,d1
 .col:   add.l   d2,d2
         bcc.s   .skip
@@ -73,7 +147,12 @@ apply_delta:
         lea     FB_ROWBYTES(a5),a5
         dbf     d3,.mbit
         dbf     d5,.mbyte
-        move.l  a4,a0                         ; fin del delta
+        bra     .done                         ; las macros no entran en bra.s
+
+.three: DELTA_ROWS  3
+        bra     .done
+.four:  DELTA_ROWS  4
+.done:  move.l  a4,a0                         ; fin del delta
         movem.l (sp)+,d0-d7/a1/a4-a6
         rts
 
