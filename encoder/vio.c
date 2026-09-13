@@ -126,7 +126,7 @@ FILE *a5_open_decoder(const char *path, double start, double duration,
 }
 
 FILE *a5_open_audio(const char *path, double start, double duration,
-                    const char *afilter, int rate)
+                    const char *afilter, int rate, int channels)
 {
     char cmd[8192];
     char sspart[64] = "", tpart[64] = "", afpart[1024] = "";
@@ -137,8 +137,8 @@ FILE *a5_open_audio(const char *path, double start, double duration,
         snprintf(afpart, sizeof afpart, "-af \"%s\" ", afilter);
 
     snprintf(cmd, sizeof cmd,
-             "ffmpeg -v error -nostdin %s-i \"%s\" %s-vn -ac 1 %s"
-             "-f s16le -ar %d -", sspart, path, tpart, afpart, rate);
+             "ffmpeg -v error -nostdin %s-i \"%s\" %s-vn -ac %d %s"
+             "-f s16le -ar %d -", sspart, path, tpart, channels, afpart, rate);
     return open_pipe(cmd, "rb");
 }
 

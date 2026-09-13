@@ -1981,6 +1981,62 @@ son identicos a los del decoder de referencia.
 
 ---
 
+## 2026-09-13 — H20: audio automatico (canal, ganancia y formato)
+
+Tres ajustes que se hicieron a mano en los videos de esta semana pasan a
+ser el comportamiento por defecto. Los tres se pueden forzar como antes
+(`--audio-channel mix|left|right`, `--audio-gain F`, `--audio-format
+fib4|pcm8|adpcm`).
+
+**Canal (`--audio-channel auto`).** Se lee la fuente en estereo a 16 kHz,
+se pasa por un pasaaltos de 2 kHz (biquad de segundo orden) y se compara la
+energia de (L+R)/2 con la de (L-R)/2. Si la contrafase esta a menos de 5 dB
+de la fase, se usa un solo canal: el que tenga mas agudos. El umbral sale
+de los casos medidos a mano:
+
+| clip | contrafase bajo la fase | decision | a mano habia hecho falta |
+|---|---|---|---|
+| house | 3,8 dB | un canal (derecho) | si (izquierdo; Az oia el agudo en los dos) |
+| See You in 30 Years | 3,6 dB | un canal (izquierdo) | si |
+| Evangelion | 6,4 dB | mezcla | no |
+| delorean | 16,5 dB | mezcla | no |
+| Caniggia | 21,7 dB | mezcla | no |
+
+(Las cifras difieren un poco de las del 2026-09-13 porque aquellas eran
+por banda de 2-4 kHz y estas son todo lo que esta arriba de 2 kHz.)
+
+**Ganancia (`--audio-gain auto`).** fib4 satura por pendiente: cuanto mas
+fuerte, peor. Se prueban 1, 0,85, 0,7, 0,6, 0,5, 0,42, 0,35, 0,3 y 0,25, y
+se queda con la mas fuerte que este a menos de 1 dB del mejor SNR (bajar
+tambien baja el volumen; muy abajo el SNR vuelve a caer por el redondeo a
+8 bits). pcm8 y adpcm mejoran con el volumen: pico a -1 dB, hasta 4x.
+
+| clip | ganancia elegida | SNR fib4 con 1,0 | SNR elegido |
+|---|---|---|---|
+| house | 1,00 | 22,9 | 22,9 |
+| Evangelion | 1,00 | 18,2 | 18,2 |
+| See You in 30 Years | 0,70 | 14,8 | 17,5 |
+| Caniggia (22,5 s) | 0,35 | ~9 | 19,8 |
+| delorean | 0,35 | 8,0 | 15,6 |
+
+**Formato (`--audio-format auto`).** fib4, salvo que despues del control
+de tasa el video ya este **sin perdida** (el stream elegido no tiene mas
+error que el de umbral 0) y el disco que sobra alcance para pcm8. Entonces
+se rearma el stream con pcm8 al mismo umbral y se acepta si entra y el
+error del video no sube mas de 0,1 % (pcm8 cuesta menos CPU que fib4, asi
+que la linea de tiempo solo puede mejorar). Medido:
+
+| clip | antes | con auto |
+|---|---|---|
+| See You in 30 Years, 16c mh3 | fib4 17,5 dB, sobraban 102 KB | **pcm8 34,3 dB**, sobran 34 KB, mismo video |
+| delorean, 32c mh2 | fib4 15,6 dB, sobraban 119 KB, 14 tarde | **pcm8 35,2 dB**, sobran 76 KB, 12 tarde |
+| house, 32c mh4 26 s | fib4, sobraban 43 KB | fib4 (pcm8 no entra) |
+
+Los cinco pasan la verificacion del decoder de referencia (frames y
+muestras de audio identicas).
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

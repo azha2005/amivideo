@@ -176,10 +176,10 @@ pasabajos de la A500, así que en la máquina real suena un poco más apagado.
 
 | opción | qué hace | consejo |
 |---|---|---|
-| `--audio-format F` | `fib4` (4 bits), `pcm8` (8 bits) o `none` | si el audio está fuerte, fib4 distorsiona: mirá el SNR y probá `pcm8` |
+| `--audio-format F` | `auto`, `fib4` (4 bits), `pcm8` (8 bits) o `none` | `auto` (por defecto) usa fib4, y pcm8 si el video entra sin pérdida y sobra disco |
 | `--audio-rate HZ` | frecuencia aproximada; se usa el período entero de Paula más cercano | 8006 por defecto; 11025 suena más claro |
-| `--audio-channel C` | `mix`, `left` o `right` | si falta un sonido en la preview, probá `left`: la suma de canales borra lo que está en contrafase |
-| `--audio-gain F` | ganancia antes de pasar a 8 bits | que `recortadas` quede en 0 |
+| `--audio-channel C` | `auto`, `mix`, `left` o `right` | `auto` (por defecto) usa un solo canal si la mezcla borraría lo que está en contrafase |
+| `--audio-gain F` | ganancia antes de pasar a 8 bits, o `auto` | `auto` (por defecto): fib4 busca el mejor SNR, pcm8 lleva el pico a −1 dB |
 | `--no-audio` | sin audio | |
 
 La lista completa sale con `.\work\a500vp-enc.exe --help`.

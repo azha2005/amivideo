@@ -86,9 +86,13 @@ typedef struct {
     double   snr;          /* dB, lo que suena contra la entrada */
     double   peak;         /* pico de la entrada en escala de 8 bits */
     long     clipped;      /* muestras recortadas por la ganancia */
+    double   gain;         /* la que se uso */
 } A5Audio;
 
-/* Lee el audio de la fuente y lo codifica entero como un solo flujo.
+/* Lee el audio de la fuente y lo deja en la frecuencia EXACTA de Paula, en
+ * escala de 8 bits con signo y a ganancia 1: nsamples muestras. La
+ * codificacion va aparte (audio_code) para poder probar ganancias y
+ * formatos sin volver a llamar a ffmpeg (H20).
  *
  * ffmpeg no puede entregar 8006,535 Hz: solo frecuencias enteras. Se le pide
  * la entera de arriba (con su filtro antialias, que es bueno) y el ultimo
@@ -99,18 +103,16 @@ typedef struct {
  * pal el audio se toma mas rapido y sube de tono; se le pide a ffmpeg una
  * frecuencia mas baja en la misma proporcion para que su antialias corte
  * donde corresponde despues de acelerar. */
-static void encode_audio(A5Audio *au, const char *in, double start,
-                         double duration, double speed, size_t nframes,
-                         double gain, const char *afilter)
+static float *audio_input(const char *in, double start, double duration,
+                          double speed, double hz, size_t nsamples,
+                          const char *afilter)
 {
-    int rate = (int)ceil(au->hz / speed);
-    double step = speed * rate / au->hz;   /* muestras de ffmpeg por muestra */
-    FILE *f = a5_open_audio(in, start, duration, afilter, rate);
+    int rate = (int)ceil(hz / speed);
+    double step = speed * rate / hz;       /* muestras de ffmpeg por muestra */
+    FILE *f = a5_open_audio(in, start, duration, afilter, rate, 1);
     int16_t *raw = NULL;
     size_t nraw = 0, cap = 0, i;
     float *x;
-    double sig = 0, noise = 0;
-    int acc = 0;
     uint8_t b2[2];
 
     if (!f) die("no pude arrancar ffmpeg para el audio");
@@ -124,29 +126,46 @@ static void encode_audio(A5Audio *au, const char *in, double start,
     }
     a5_pclose(f);
 
-    au->nsamples = a5_audio_samples_through((uint32_t)nframes - 1, au->hz);
-    x = malloc(au->nsamples * sizeof *x);
+    x = malloc((nsamples ? nsamples : 1) * sizeof *x);
+    if (!x) die("sin memoria");
+    /* Si la fuente se acaba antes que el video, el resto es silencio. */
+    for (i = 0; i < nsamples; i++) {
+        double pos = i * step, fr, va, vb;
+        size_t k = (size_t)pos;
+        fr = pos - (double)k;
+        va = k < nraw ? raw[k] : 0;
+        vb = k + 1 < nraw ? raw[k + 1] : 0;
+        x[i] = (float)((va + (vb - va) * fr) / 256.0);
+    }
+    free(raw);
+    return x;
+}
+
+/* Codifica la entrada x1 (ganancia 1) con la ganancia y el formato de au.
+ * au->format, period, hz y nsamples ya tienen que estar puestos. */
+static void audio_code(A5Audio *au, const float *x1, double gain)
+{
+    float *x = malloc((au->nsamples ? au->nsamples : 1) * sizeof *x);
+    double sig = 0, noise = 0;
+    int acc = 0;
+    size_t i;
+
+    free(au->bytes); free(au->recon);
     au->recon = malloc(au->nsamples ? au->nsamples : 1);
     au->nbytes = a5_audio_bytes(au->format, au->nsamples);
     au->bytes = calloc(au->nbytes ? au->nbytes : 1, 1);
     if (!x || !au->recon || !au->bytes) die("sin memoria");
 
-    /* Si la fuente se acaba antes que el video, el resto es silencio. */
+    au->gain = gain;
     au->peak = 0;
     au->clipped = 0;
     for (i = 0; i < au->nsamples; i++) {
-        double pos = i * step, fr, a, b, v;
-        size_t k = (size_t)pos;
-        fr = pos - (double)k;
-        a = k < nraw ? raw[k] : 0;
-        b = k + 1 < nraw ? raw[k + 1] : 0;
-        v = (a + (b - a) * fr) / 256.0 * gain;
+        double v = x1[i] * gain;
         if (fabs(v) > au->peak) au->peak = fabs(v);
         if (v > 127)  { v = 127;  au->clipped++; }
         if (v < -128) { v = -128; au->clipped++; }
         x[i] = (float)v;
     }
-    free(raw);
 
     if (au->format == A5V_AUDIO_FIB4) {
         a5_fib4_encode(x, au->nsamples, au->bytes, au->recon, &acc);
@@ -182,6 +201,93 @@ static void encode_audio(A5Audio *au, const char *in, double start,
     }
     au->snr = noise > 0 ? 10 * log10(sig / noise) : 99;
     free(x);
+}
+
+/* H20: la ganancia, si no se pidio una.
+ *
+ * fib4 satura por pendiente: cuanto mas fuerte, peor (DECISIONS.md, Hito 5
+ * y Caniggia: 9,2 dB con ganancia 1, 17,6 con 0,5). Nunca se sube de 1, y
+ * para abajo se busca el mejor SNR medido; como bajar tambien baja el
+ * volumen, se queda con la mas fuerte que este a menos de 1 dB de la mejor.
+ * Muy abajo el SNR vuelve a caer, porque manda el redondeo a 8 bits.
+ *
+ * pcm8 y adpcm mejoran con el volumen: el pico va a -1 dB, sin pasar de 4x. */
+static void audio_code_auto(A5Audio *au, const float *x1)
+{
+    static const double g[] = { 1.0, 0.85, 0.7, 0.6, 0.5, 0.42, 0.35, 0.3,
+                                0.25 };
+    int k, n = (int)(sizeof g / sizeof g[0]);
+    double best = -1e9, pick = 1.0, peak1 = 0;
+    size_t i;
+
+    if (au->format != A5V_AUDIO_FIB4) {
+        for (i = 0; i < au->nsamples; i++)
+            if (fabs(x1[i]) > peak1) peak1 = fabs(x1[i]);
+        pick = peak1 > 0 ? 127.0 * 0.891 / peak1 : 1.0;
+        if (pick > 4.0) pick = 4.0;
+        audio_code(au, x1, pick);
+        return;
+    }
+    {
+        double snr[16];
+        for (k = 0; k < n; k++) {
+            audio_code(au, x1, g[k]);
+            snr[k] = au->snr;
+            if (snr[k] > best) best = snr[k];
+        }
+        for (k = 0; k < n; k++)
+            if (snr[k] >= best - 1.0) { pick = g[k]; break; }
+    }
+    audio_code(au, x1, pick);
+}
+
+/* H20: cuanto de los agudos esta en contrafase, y que canal usar.
+ *
+ * La mezcla L+R cancela lo que esta en contrafase: en house.mp4 un agudo
+ * entero desaparecia (DECISIONS.md, 2026-09-13). Se compara la energia
+ * arriba de 2 kHz de la parte en fase (L+R)/2 con la de la parte en
+ * contrafase (L-R)/2. Si la contrafase esta a menos de 5 dB, se usa un solo
+ * canal, el que tenga mas agudos. Medido a mano: house 1,4 dB y "See You in
+ * 30 Years" 3,4 dB necesitaban un canal; Evangelion 7,9 dB no.
+ * Devuelve el filtro para a5_open_audio (NULL = mezcla). */
+static const char *audio_pick_channel(const char *in, double start,
+                                      double duration, double *mid_db,
+                                      double *side_db)
+{
+    enum { FS = 16000 };
+    FILE *f = a5_open_audio(in, start, duration, NULL, FS, 2);
+    /* Pasaaltos de 2 kHz de segundo orden (RBJ, Q = 0,707). */
+    double w0 = 2 * 3.14159265358979 * 2000.0 / FS, cw = cos(w0);
+    double al = sin(w0) / (2 * 0.7071), a0 = 1 + al;
+    double b0 = (1 + cw) / 2 / a0, b1 = -(1 + cw) / a0, b2 = b0;
+    double a1 = -2 * cw / a0, a2 = (1 - al) / a0;
+    double z[4][2] = { { 0 } }, e[4] = { 0 };
+    uint8_t b4[4];
+    size_t n = 0;
+
+    *mid_db = *side_db = -99;
+    if (!f) return NULL;
+    while (fread(b4, 1, 4, f) == 4) {
+        double l = (int16_t)(b4[0] | (b4[1] << 8));
+        double r = (int16_t)(b4[2] | (b4[3] << 8));
+        double v[4];
+        int c;
+        v[0] = (l + r) / 2; v[1] = (l - r) / 2; v[2] = l; v[3] = r;
+        for (c = 0; c < 4; c++) {
+            /* forma directa transpuesta */
+            double y = b0 * v[c] + z[c][0];
+            z[c][0] = b1 * v[c] - a1 * y + z[c][1];
+            z[c][1] = b2 * v[c] - a2 * y;
+            e[c] += y * y;
+        }
+        n++;
+    }
+    a5_pclose(f);
+    if (n == 0 || e[0] <= 0) return NULL;
+    *mid_db = 10 * log10(e[0] / n / (32768.0 * 32768.0));
+    *side_db = e[1] > 0 ? 10 * log10(e[1] / n / (32768.0 * 32768.0)) : -99;
+    if (*side_db < *mid_db - 5.0) return NULL;
+    return e[3] > e[2] ? "pan=mono|c0=c1" : "pan=mono|c0=c0";
 }
 
 /* Los bytes de audio del paquete n: las muestras S(n-1)..S(n)-1. */
@@ -754,6 +860,11 @@ typedef struct {
     int       have, fits;
     double    bestthr;
     size_t    besttotal;
+    /* El stream sin perdida, si se probo: para saber si el elegido es igual
+     * de bueno aunque su umbral no sea 0 (H20). */
+    int       zero_tried;
+    size_t    zero_total;
+    double    zero_err;
 } RateCtl;
 
 static size_t rc_try(RateCtl *rc, double thr)
@@ -768,6 +879,11 @@ static size_t rc_try(RateCtl *rc, double thr)
                  rc->au, NULL);
     total = A5V_HEADER_SIZE + s.buf.len;
     fits = rc->budget <= 0 || total <= (size_t)rc->budget;
+    if (thr == 0) {
+        rc->zero_tried = 1;
+        rc->zero_total = total;
+        rc->zero_err = s.err_sum;
+    }
 
     if (!rc->have)            better = 1;
     else if (fits && !rc->fits) better = 1;          /* entrar manda */
@@ -801,16 +917,21 @@ static void usage(void)
 "  --budget BYTES          tope de bytes del bitstream, audio incluido;\n"
 "                          0 = sin tope (por defecto: lo que queda en el disco\n"
 "                          despues del reproductor, o 883712 sin --adf)\n"
-"  --audio-format F        fib4 | adpcm | pcm8 | none (fib4). adpcm usa los\n"
-"                          mismos 4 bits que fib4 pero con paso adaptativo:\n"
+"  --audio-format F        auto | fib4 | adpcm | pcm8 | none (auto: fib4, y\n"
+"                          pcm8 si el video entra sin perdida y sobra disco).\n"
+"                          adpcm usa los mismos 4 bits que fib4 pero con\n"
+"                          paso adaptativo:\n"
 "                          sigue los agudos, y cuesta mas CPU al reproducir\n"
 "  --audio-rate HZ         frecuencia aproximada; se usa el periodo entero mas\n"
 "                          cercano y su frecuencia exacta (8006,5)\n"
 "  --audio-period N        periodo de Paula, en lugar de --audio-rate (443)\n"
-"  --audio-gain F          ganancia antes de pasar a 8 bits (1.0)\n"
-"  --audio-channel C       mix | left | right (mix). mix suma los canales y\n"
-"                          borra lo que esta en contrafase; left o right\n"
-"                          lo conserva\n"
+"  --audio-gain F|auto     ganancia antes de pasar a 8 bits (auto: fib4 busca\n"
+"                          el mejor SNR sin pasar de 1; pcm8 lleva el pico a\n"
+"                          -1 dB)\n"
+"  --audio-channel C       auto | mix | left | right (auto). mix suma los\n"
+"                          canales y borra lo que esta en contrafase; auto\n"
+"                          usa un solo canal si arriba de 2 kHz la\n"
+"                          contrafase esta a menos de 5 dB de la fase\n"
 "  --repeat-boost F        cuanto mas permisivo es repetir que actualizar (1.5)\n");
     /* Partido en dos: un solo literal pasaba los 4095 caracteres que C99
      * obliga a soportar, y -pedantic avisa. */
@@ -880,9 +1001,12 @@ int main(int argc, char **argv)
     long   cyc_limit;
     long   budget = -1;             /* -1 = lo que queda en el disco */
     int    audio_period = 443;
-    int    audio_format = -1;       /* -1 = fib4 si la fuente tiene audio */
-    double audio_gain = 1.0;
+    int    audio_format = -1;       /* -1 = auto: fib4, o pcm8 si sobra disco */
+    double audio_gain = -1;         /* -1 = auto (H20) */
     const char *audio_filter = NULL;   /* NULL = mezcla L+R (-ac 1) */
+    int    audio_chan_auto = 1;
+    int    audio_fmt_auto = 1;
+    float *audio_x1 = NULL;         /* la entrada a ganancia 1, para H20 */
     const char *adf_path = NULL;
     const char *boot_path = "work\\boot.bin", *player_path = "work\\player.bin";
     int    reserve_tail = 0;
@@ -947,23 +1071,31 @@ int main(int argc, char **argv)
             if (r <= 0) die("--audio-rate tiene que ser positivo");
             audio_period = (int)(A5_CCK_PAL / r + 0.5);
         }
-        else if (!strcmp(a, "--audio-gain") && has)    audio_gain = atof(argv[++i]);
+        else if (!strcmp(a, "--audio-gain") && has) {
+            const char *v = argv[++i];
+            audio_gain = !strcmp(v, "auto") ? -1 : atof(v);
+            if (audio_gain != -1 && audio_gain <= 0)
+                die("--audio-gain tiene que ser positiva o auto");
+        }
         else if (!strcmp(a, "--audio-channel") && has) {
             /* Por indice y no por nombre (FL/FR): asi left anda tambien con
              * una fuente mono, donde el unico canal es FC. */
             const char *v = argv[++i];
-            if (!strcmp(v, "mix"))        audio_filter = NULL;
+            audio_chan_auto = !strcmp(v, "auto");
+            if (audio_chan_auto)          audio_filter = NULL;
+            else if (!strcmp(v, "mix"))   audio_filter = NULL;
             else if (!strcmp(v, "left"))  audio_filter = "pan=mono|c0=c0";
             else if (!strcmp(v, "right")) audio_filter = "pan=mono|c0=c1";
-            else die("--audio-channel: mix, left o right");
+            else die("--audio-channel: auto, mix, left o right");
         }
         else if (!strcmp(a, "--audio-format") && has) {
             const char *v = argv[++i];
-            if (!strcmp(v, "fib4"))      audio_format = A5V_AUDIO_FIB4;
+            if (!strcmp(v, "auto"))      audio_format = -1;
+            else if (!strcmp(v, "fib4")) audio_format = A5V_AUDIO_FIB4;
             else if (!strcmp(v, "pcm8")) audio_format = A5V_AUDIO_PCM8;
             else if (!strcmp(v, "adpcm")) audio_format = A5V_AUDIO_ADPCM;
             else if (!strcmp(v, "none")) audio_format = A5V_AUDIO_NONE;
-            else die("--audio-format: fib4, adpcm, pcm8 o none");
+            else die("--audio-format: auto, fib4, adpcm, pcm8 o none");
         }
         else if (!strcmp(a, "--adf") && has)           adf_path = argv[++i];
         else if (!strcmp(a, "--boot") && has)          boot_path = argv[++i];
@@ -1205,6 +1337,7 @@ int main(int argc, char **argv)
      * mas paquetes, audio incluido. El audio no se negocia con el control de
      * tasa; lo que se ajusta es el video. */
     memset(&au, 0, sizeof au);
+    audio_fmt_auto = audio_format < 0;
     if (audio_format < 0)
         audio_format = want_audio && src.audio_rate ? A5V_AUDIO_FIB4
                                                     : A5V_AUDIO_NONE;
@@ -1217,9 +1350,24 @@ int main(int argc, char **argv)
     au.period = audio_period;
     au.hz = A5_CCK_PAL / audio_period;
     if (au.format != A5V_AUDIO_NONE) {
-        encode_audio(&au, in, start, duration,
-                     pal_speedup ? A5_VIDEO_FPS / src.fps : 1.0, nframes,
-                     audio_gain, audio_filter);
+        double speed = pal_speedup ? A5_VIDEO_FPS / src.fps : 1.0;
+        const char *chan = "mezcla L+R";
+
+        if (audio_chan_auto && src.audio_channels >= 2) {
+            double mid, side;
+            audio_filter = audio_pick_channel(in, start, duration, &mid,
+                                              &side);
+            printf("audio      : arriba de 2 kHz, fase %.1f dB y contrafase "
+                   "%.1f dB (%.1f dB abajo)\n", mid, side, mid - side);
+        }
+        if (audio_filter)
+            chan = strstr(audio_filter, "c1") ? "solo el derecho"
+                                               : "solo el izquierdo";
+        au.nsamples = a5_audio_samples_through((uint32_t)nframes - 1, au.hz);
+        audio_x1 = audio_input(in, start, duration, speed, au.hz,
+                               au.nsamples, audio_filter);
+        if (audio_gain < 0) audio_code_auto(&au, audio_x1);
+        else                audio_code(&au, audio_x1, audio_gain);
         printf("audio      : %s, periodo %d = %.3f Hz, %lu muestras (%.3f s), "
                "%lu bytes = %.2f KB/s\n",
                au.format == A5V_AUDIO_FIB4 ? "fib4"
@@ -1227,9 +1375,9 @@ int main(int argc, char **argv)
                (unsigned long)au.nsamples, au.nsamples / au.hz,
                (unsigned long)au.nbytes,
                au.nbytes / 1024.0 / (nframes / A5_VIDEO_FPS));
-        printf("             ganancia %.2f, pico %.1f de 127, %ld muestras "
-               "recortadas, SNR %.1f dB\n", audio_gain, au.peak, au.clipped,
-               au.snr);
+        printf("             %s, ganancia %.2f%s, pico %.1f de 127, %ld "
+               "muestras recortadas, SNR %.1f dB\n", chan, au.gain,
+               audio_gain < 0 ? " (auto)" : "", au.peak, au.clipped, au.snr);
     }
 
     /* Presupuesto por defecto: con --adf, exactamente lo que queda en el
@@ -1549,6 +1697,49 @@ int main(int argc, char **argv)
             printf("             AVISO: ningun umbral entro en el "
                    "presupuesto\n");
 
+        /* H20: si el video ya entra sin perdida, el disco que sobra no le
+         * sirve de nada. Con --audio-format auto se lo lleva el audio: pcm8
+         * ocupa el doble que fib4 pero no satura (delorean: de 8 a 35 dB
+         * con los bytes que sobraban). Tambien cuesta menos CPU, asi que el
+         * video no puede llegar mas tarde; se rearma igual y se comprueba. */
+        if (audio_fmt_auto && au.format == A5V_AUDIO_FIB4 && budget > 0 &&
+            rc.fits && rc.zero_tried && rc.zero_total <= (size_t)budget &&
+            st.err_sum <= rc.zero_err + 1e-9 &&
+            total + au.nbytes <= (size_t)budget) {
+            A5Audio a2;
+            A5Stream s2;
+            size_t t2;
+
+            memset(&a2, 0, sizeof a2);
+            a2.format = A5V_AUDIO_PCM8;
+            a2.period = au.period;
+            a2.hz = au.hz;
+            a2.nsamples = au.nsamples;
+            if (audio_gain < 0) audio_code_auto(&a2, audio_x1);
+            else                audio_code(&a2, audio_x1, audio_gain);
+            build_stream(&s2, idx, nframes, scenes, nscenes, planes, ncolors,
+                         y0, y1, qthr, repeat_boost, cyc_limit, min_hold,
+                         max_late, &a2, NULL);
+            t2 = A5V_HEADER_SIZE + s2.buf.len;
+            /* El video tiene que quedar igual: la linea de tiempo cambia un
+             * poco (pcm8 cuesta menos CPU) y puede mover alguna degradacion
+             * para un lado o para el otro; se tolera un 0,1 %. */
+            if (t2 <= (size_t)budget && s2.err_sum <= st.err_sum * 1.001) {
+                printf("audio auto : el video entra sin perdida y sobra "
+                       "disco: pcm8, ganancia %.2f, SNR %.1f dB (fib4 daba "
+                       "%.1f), +%lu bytes\n", a2.gain, a2.snr, au.snr,
+                       (unsigned long)(t2 - total));
+                free(au.bytes); free(au.recon);
+                au = a2;
+                a5buf_free(&st.buf); free(st.crc);
+                st = s2;
+                total = t2;
+            } else {
+                free(a2.bytes); free(a2.recon);
+                a5buf_free(&s2.buf); free(s2.crc);
+            }
+        }
+
         /* Calidad contra la fuente del stream elegido: se lo arma una vez
          * mas (sale identico) midiendo lo que se ve contra el original. */
         {
@@ -1694,6 +1885,6 @@ int main(int argc, char **argv)
     free(srcframes); free(frames); free(idx);
     for (i = 0; i < nscenes; i++) free(scenes[i].pal);
     free(prev); free(cur); free(delta); free(scenes);
-    free(au.bytes); free(au.recon); free(boot); free(player);
+    free(au.bytes); free(au.recon); free(audio_x1); free(boot); free(player);
     return 0;
 }
