@@ -127,7 +127,7 @@ pasa el bootblock.
 | 18 | 2 | Ultima fila activa + 1 (`y1`) |
 | 20 | 4 | Cantidad de paquetes = cantidad de frames |
 | 24 | 4 | Bytes de paquetes que siguen a la cabecera |
-| 28 | 1 | Formato del audio: 0 = ninguno, 1 = fib4, 2 = pcm8 |
+| 28 | 1 | Formato del audio: 0 = ninguno, 1 = fib4, 2 = pcm8, 3 = adpcm |
 | 29 | 1 | Filas logicas por franja de paleta (0 = una sola paleta) |
 | 30 | 1 | Colores que cada franja puede cambiar (0 si hay una sola franja) |
 | 31 | 1 | Reservado, 0 |
@@ -289,6 +289,14 @@ informativa: el reproductor no la necesita, solo consume el flujo.
   al otro**. La suma es en 8 bits con vuelta (como `add.b`), pero el
   encoder elige los nibbles para que nunca de la vuelta.
 - **pcm8** (formato 2): una muestra por byte, con signo.
+- **adpcm** (formato 3): IMA ADPCM de 4 bits, el mismo del disco de musica
+  (A5MU). Dos muestras por byte, **nibble alto primero**. Estado: predictor
+  de 16 bits con signo e indice de paso 0..88, los dos en 0 al principio del
+  flujo y **siguiendo de un paquete al otro**, sin bloques. Cada nibble se
+  aplica con las tablas IMA de siempre (`encoder/adpcm.c`), con el predictor
+  saturado a 16 bits; la muestra que suena es el **byte alto** del
+  predictor. El reproductor v6 todavia no lo decodifica: rechaza la
+  cabecera. Solo el decoder de referencia lo reproduce.
 
 ### Verificacion
 

@@ -15,6 +15,7 @@
 #define A5V_AUDIO_NONE   0
 #define A5V_AUDIO_FIB4   1       /* Fibonacci-delta de 4 bits, 8SVX */
 #define A5V_AUDIO_PCM8   2       /* PCM de 8 bits con signo */
+#define A5V_AUDIO_ADPCM  3       /* IMA ADPCM de 4 bits (encoder/adpcm.c) */
 #define A5V_HDR_AUDIOFMT 28
 
 /* Paleta por franjas (byte 29, desde la version 4): filas logicas por
@@ -126,6 +127,11 @@ long a5_cyc_byte(int planes);
 #define A5_AUD_BUF_SAMPLES   512
 #define A5_CYC_AUDIO_FILL    32300
 #define A5_CYC_AUDIO_FILL_PCM8 28200
+/* ADPCM: ESTIMADO contando instrucciones del decodificador de A5MU
+ * (player/music.s, adpcm_step), no medido todavia en el disco de medicion.
+ * Son ~115 ciclos por muestra contra ~63 de fib4: el paso adaptativo se
+ * paga en CPU. Medirlo es lo primero que hay que hacer si esto se usa. */
+#define A5_CYC_AUDIO_FILL_ADPCM 59000
 
 /* --- costo de la copia con el Blitter (H12) ------------------------------
  * Medido el 2026-09-12 con el disco de medicion, copiando 16 veces el area

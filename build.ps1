@@ -105,6 +105,7 @@ function Build-All {
     $shared = @((Join-Path $root 'encoder\color.c'),
                 (Join-Path $root 'encoder\quant.c'),
                 (Join-Path $root 'encoder\stream.c'),
+                (Join-Path $root 'encoder\adpcm.c'),
                 (Join-Path $root 'encoder\vio.c'))
     $cflags = @('-std=c11', '-O2', '-Wall', '-Wextra', '-pedantic')
 

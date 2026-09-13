@@ -14,6 +14,7 @@
 #include <time.h>
 #include "a500vp.h"
 #include "stream.h"
+#include "adpcm.h"
 #include "adf.h"
 
 /* Un pixel logico es 2x2 pixeles de pantalla, y la pantalla de 320x256 se ve
@@ -149,6 +150,21 @@ static void encode_audio(A5Audio *au, const char *in, double start,
 
     if (au->format == A5V_AUDIO_FIB4) {
         a5_fib4_encode(x, au->nsamples, au->bytes, au->recon, &acc);
+    } else if (au->format == A5V_AUDIO_ADPCM) {
+        /* IMA ADPCM trabaja en 16 bits; lo que suena es el byte alto del
+         * predictor, porque Paula es de 8. Por eso la entrada se sube a la
+         * escala de 16 bits y la reconstruccion vuelve en 8. */
+        A5AdpcmState st = { 0, 0 };
+        int16_t *w = malloc((au->nsamples ? au->nsamples : 1) * sizeof *w);
+        if (!w) die("sin memoria");
+        for (i = 0; i < au->nsamples; i++) {
+            long v = lround(x[i] * 256.0);
+            if (v > 32767)  v = 32767;
+            if (v < -32768) v = -32768;
+            w[i] = (int16_t)v;
+        }
+        a5_adpcm_encode(w, au->nsamples, au->bytes, au->recon, &st, 1);
+        free(w);
     } else {
         for (i = 0; i < au->nsamples; i++) {
             long v = lround(x[i]);
@@ -753,7 +769,9 @@ static void usage(void)
 "  --budget BYTES          tope de bytes del bitstream, audio incluido;\n"
 "                          0 = sin tope (por defecto: lo que queda en el disco\n"
 "                          despues del reproductor, o 883712 sin --adf)\n"
-"  --audio-format F        fib4 | pcm8 | none (fib4 si la fuente tiene audio)\n"
+"  --audio-format F        fib4 | adpcm | pcm8 | none (fib4). adpcm usa los\n"
+"                          mismos 4 bits que fib4 pero con paso adaptativo:\n"
+"                          sigue los agudos, y cuesta mas CPU al reproducir\n"
 "  --audio-rate HZ         frecuencia aproximada; se usa el periodo entero mas\n"
 "                          cercano y su frecuencia exacta (8006,5)\n"
 "  --audio-period N        periodo de Paula, en lugar de --audio-rate (443)\n"
@@ -898,8 +916,9 @@ int main(int argc, char **argv)
             const char *v = argv[++i];
             if (!strcmp(v, "fib4"))      audio_format = A5V_AUDIO_FIB4;
             else if (!strcmp(v, "pcm8")) audio_format = A5V_AUDIO_PCM8;
+            else if (!strcmp(v, "adpcm")) audio_format = A5V_AUDIO_ADPCM;
             else if (!strcmp(v, "none")) audio_format = A5V_AUDIO_NONE;
-            else die("--audio-format: fib4, pcm8 o none");
+            else die("--audio-format: fib4, adpcm, pcm8 o none");
         }
         else if (!strcmp(a, "--adf") && has)           adf_path = argv[++i];
         else if (!strcmp(a, "--boot") && has)          boot_path = argv[++i];
@@ -1158,7 +1177,8 @@ int main(int argc, char **argv)
                      audio_gain);
         printf("audio      : %s, periodo %d = %.3f Hz, %lu muestras (%.3f s), "
                "%lu bytes = %.2f KB/s\n",
-               au.format == A5V_AUDIO_FIB4 ? "fib4" : "pcm8", au.period, au.hz,
+               au.format == A5V_AUDIO_FIB4 ? "fib4"
+               : au.format == A5V_AUDIO_ADPCM ? "adpcm" : "pcm8", au.period, au.hz,
                (unsigned long)au.nsamples, au.nsamples / au.hz,
                (unsigned long)au.nbytes,
                au.nbytes / 1024.0 / (nframes / A5_VIDEO_FPS));

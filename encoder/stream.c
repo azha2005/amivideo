@@ -308,6 +308,7 @@ long a5_audio_fill_cost(int format)
     switch (format) {
     case A5V_AUDIO_FIB4: return A5_CYC_AUDIO_FILL;
     case A5V_AUDIO_PCM8: return A5_CYC_AUDIO_FILL_PCM8;
+    case A5V_AUDIO_ADPCM: return A5_CYC_AUDIO_FILL_ADPCM;
     default:             return 0;
     }
 }
@@ -317,6 +318,7 @@ size_t a5_audio_bytes(int format, size_t samples)
     switch (format) {
     case A5V_AUDIO_FIB4: return samples / 2;
     case A5V_AUDIO_PCM8: return samples;
+    case A5V_AUDIO_ADPCM: return samples / 2;
     default:             return 0;
     }
 }

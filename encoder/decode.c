@@ -15,6 +15,7 @@
 #include <math.h>
 #include "a500vp.h"
 #include "stream.h"
+#include "adpcm.h"
 
 static void die(const char *msg)
 {
@@ -109,6 +110,7 @@ static int8_t *extract_audio(const uint8_t *data, size_t len, uint32_t nframes,
     int8_t *out = NULL;
     size_t n = 0, cap = 0;
     int acc = 0;
+    A5AdpcmState ast = { 0, 0 };
     uint32_t i;
 
     for (i = 0; i < nframes; i++) {
@@ -122,14 +124,16 @@ static int8_t *extract_audio(const uint8_t *data, size_t len, uint32_t nframes,
         if (plen < 6 || (size_t)(end - p) < plen) die("paquete invalido");
         a = p + 6 + ((p[3] & A5V_F_PALETTE) ? palwords * 2 : 0);
         if (a + alen > p + plen) die("audio incompleto");
-        ns = afmt == A5V_AUDIO_FIB4 ? (size_t)alen * 2 : alen;
+        /* fib4 y adpcm son dos muestras por byte; pcm8, una. */
+        ns = afmt == A5V_AUDIO_PCM8 ? alen : (size_t)alen * 2;
         if (n + ns > cap) {
             cap = (n + ns) * 2 + 4096;
             out = realloc(out, cap);
             if (!out) die("sin memoria");
         }
-        if (afmt == A5V_AUDIO_FIB4) a5_fib4_decode(a, alen, &acc, out + n);
-        else                        memcpy(out + n, a, alen);
+        if (afmt == A5V_AUDIO_FIB4)       a5_fib4_decode(a, alen, &acc, out + n);
+        else if (afmt == A5V_AUDIO_ADPCM) a5_adpcm_decode(a, alen, &ast, out + n);
+        else                              memcpy(out + n, a, alen);
         n += ns;
         p += plen;
     }
@@ -692,7 +696,7 @@ int main(int argc, char **argv)
     nframes  = be32(data + 20);
     afmt     = data[A5V_HDR_AUDIOFMT];
     aper     = (int)be16(data + 14);
-    if (afmt > A5V_AUDIO_PCM8) die("formato de audio desconocido");
+    if (afmt > A5V_AUDIO_ADPCM) die("formato de audio desconocido");
     if (afmt && aper < 124) die("periodo de audio invalido");
 
     if (w != A5_W || h != A5_H) die("geometria inesperada");
@@ -723,7 +727,9 @@ int main(int argc, char **argv)
         asamples = extract_audio(data, len, nframes, npalw, afmt,
                                  &nasamples);
         printf("             audio %s, periodo %d = %.3f Hz, %lu muestras "
-               "(%.3f s)\n", afmt == A5V_AUDIO_FIB4 ? "fib4" : "pcm8", aper,
+               "(%.3f s)\n",
+               afmt == A5V_AUDIO_FIB4 ? "fib4" :
+               afmt == A5V_AUDIO_ADPCM ? "adpcm" : "pcm8", aper,
                A5_CCK_PAL / aper, (unsigned long)nasamples,
                nasamples / (A5_CCK_PAL / aper));
     } else {
