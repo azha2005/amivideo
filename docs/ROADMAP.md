@@ -3,9 +3,26 @@
 `CLAUDE.md` deja como opcional "trackloader MFM propio con decodificacion
 por Blitter, precarga parcial y soporte multidisco". Este documento lo
 convierte en un plan, con lo medido el 2026-09-12 como punto de partida.
+Revisado el 2026-09-13 despues de codificar una decena de videos reales con
+el formato v6 (ver "Estado" y "Orden recomendado").
 
-**Nada de esto esta hecho. Las ganancias marcadas como "estimado" son
-cuentas, no mediciones, y hay que medirlas antes de darlas por buenas.**
+**Las ganancias marcadas como "estimado" son cuentas, no mediciones, y hay
+que medirlas antes de darlas por buenas.**
+
+---
+
+## Estado al 2026-09-13
+
+| hito | estado |
+|---|---|
+| H12 copia del buffer visible con el Blitter | **hecho** (formato v5) |
+| H18 franjas parciales de paleta, 16 y 32 colores | **hecho** (formato v6) |
+| Formato v6 en la A500 real | **probado por Az** con `delorean_32c_mh2_pcm11k.adf`: 32 colores, franjas parciales, copia con Blitter y pcm8 a 11 kHz |
+| H9 ADPCM | **a medias:** encoder y decoder de referencia si, reproductor no |
+| `--audio-channel` | **hecho**: la mezcla L+R borraba un agudo en contrafase (house) |
+| H17 16 colores con franjas | **obsoleto**: lo resolvio H18 |
+| H8, H10, H11, H13-H16 | pendientes |
+| H19-H25 | nuevos, ver abajo |
 
 ---
 
@@ -55,6 +72,14 @@ Esta rama ataca la pared real, que es el tiempo de decodificacion. Ninguno
 de estos hitos necesita el grabador.
 
 ### H9 — Audio ADPCM en vez de fib4 (barato, ya esta escrito)
+
+**A medias (2026-09-13):** el encoder y el decoder de referencia ya generan
+y reproducen el formato 3 (`FORMAT.md`). Falta portar `adpcm_step` de
+`player/music.s` de A5MU al reproductor y **medir** el costo del llenado:
+hoy el encoder usa 59 000 ciclos, que es una estimacion. Los videos de
+estos dias muestran para que sirve: con audio fuerte (Caniggia, delorean,
+"See You in 30 Years") fib4 cayo a 8-15 dB y hubo que bajar la ganancia a
+0,5 o pasar a pcm8, que ocupa el doble.
 
 En el fork A5MU se midio IMA ADPCM de 4 bits contra fib4 **con el mismo
 tamano exacto**: 21,7 dB contra 12,8 dB a la misma ganancia. fib4 satura por
@@ -229,7 +254,11 @@ haz por linea). En la tapa del disco de musica bajo los pixeles malos de
   diapositivas, no para una escena de accion. Medir con material real antes
   de invertir.
 
-### H17 — 16 colores con franjas de paleta
+### H17 — 16 colores con franjas de paleta  **[OBSOLETO 2026-09-13]**
+
+Lo resolvio H18: las franjas parciales cambian pocos colores por franja y
+entran antes de la linea con 16 y con 32 colores. Queda el texto original
+como registro.
 
 Hoy las franjas necesitan 3 planos o menos porque el Copper no llega a
 escribir 17 MOVE antes de que empiece la linea (`FORMAT.md`). Se puede
@@ -244,22 +273,121 @@ borde derecho, en vez de al principio de la propia.
 
 ---
 
-## Orden recomendado
+## Rama D: que el encoder decida solo (2026-09-13)
+
+Salio de codificar videos reales uno tras otro: en casi todos hubo que
+hacer a mano lo mismo. **Ninguno de estos hitos cambia el formato ni el
+reproductor** (salvo H23, que toca el reproductor sin tocar el formato).
+
+### H19 — Preparar la fuente sola
+
+Detectar y corregir lo que hoy se arregla con ffmpeg antes de codificar:
+
+| caso | como se reconoce | arreglo | visto en |
+|---|---|---|---|
+| Telecine 29,97 | `idet` + frames repetidos en patron 3:2 | `fieldmatch,decimate` | BTTF III |
+| PAL 25 subido a 30 | un frame repetido cada 6 | `decimate=cycle=6` | Caniggia |
+| Pelicula 24 pasada a 25 | un frame repetido cada 25 | `decimate=cycle=25` | el tren |
+| Interpolado a 60 | sin repetidos, la diferencia sube cada 5 frames | ninguno limpio: avisar | Evangelion |
+
+Se detecta con la diferencia entre frames consecutivos (`tblend` +
+`signalstats`), que es como se hizo a mano. Opcion `--source auto|raw`.
+
+### H20 — Audio automatico
+
+- **Canal:** medir la energia de L+R contra L-R por banda. Si arriba de
+  2 kHz la contrafase esta a menos de ~4 dB, usar un solo canal (house:
+  1,4 dB; "See You in 30 Years": 3,4 dB; Evangelion: 8 dB, no hizo falta).
+- **Ganancia de fib4:** fib4 empeora con el volumen. Buscar la ganancia que
+  maximiza el SNR medido (Caniggia: 9,2 dB con 1,0 y 17,6 dB con 0,5).
+- **Formato:** si despues del control de tasa sobra disco para pcm8, usarlo
+  (delorean: de 8 a 35 dB con los bytes que sobraban).
+
+### H21 — Busqueda de configuracion (`--auto`)
+
+Codificar en paralelo colores x min-hold, que es el barrido que se corrio a
+mano en cada video, y proponer las 3-4 mejores con su error, bytes y frames
+tarde. La maquina de Az tiene 16 nucleos: un barrido de 8 configuraciones
+de 20 s tarda unos minutos.
+
+### H22 — Un error que no engane
+
+El "% de pixeles a mas de 0,10" mezcla dos cosas: color (cuantizacion) y
+tiempo (imagen sostenida mientras la fuente se mueve). En Doctor Who los
+discos **sin perdida** marcaban 45-50 %, y el numero no servia para elegir.
+Reportar las dos partes por separado: contra el frame ideal cuantizado y
+contra el frame fuente del mismo instante.
+
+### H23 — El primer frame no llega tarde
+
+En casi todos los discos el frame 0, que pinta la pantalla entera, llega 3
+o 4 VBL tarde. El reproductor puede dibujarlo **antes** de arrancar el audio
+y el reloj. Cambio chico en el reproductor y en la simulacion del encoder;
+el formato no cambia.
+
+---
+
+## Rama A, segunda parte: variar por escena (2026-09-13)
+
+Pregunta de Az: por que colores y cadencia son fijos para todo el clip.
+No hay razon de fondo; quedo asi desde el principio.
+
+### H24 — Cadencia por escena
+
+`--min-hold` es un tope, y cada paquete ya es independiente: sostener una
+imagen son paquetes de repeticion. Elegir un min-hold distinto por escena
+(bajo en dialogo, alto en accion) **no cambia el formato ni el
+reproductor**.
+
+- Cambiar solo en los cortes de escena, que el encoder ya detecta: dentro
+  de una toma se nota como tiron.
+- El encoder codifica cada escena con varias cadencias y reparte el disco
+  donde un KB baja mas el error (el mismo criterio del control de tasa).
+- **Ganancia: sin estimar.** En material parejo (el tren) casi nada; en
+  material que mezcla quieto y movimiento puede ser mucho. **Medir en
+  hipotesis con 2-3 clips antes de implementar.**
+
+### H25 — Planos por paquete (formato v7)
+
+Hoy cada columna marcada lleva **todos** los planos (`FORMAT.md`). Una
+escena de 16 colores en un disco de 32 dejaria el plano 5 en cero pero lo
+escribiria igual: no ahorra nada.
+
+- Un bit o dos de los flags del paquete dicen cuantos planos trae el delta;
+  el resto no se toca. Una escena de 16 colores escribe 4 de 5 bytes por
+  columna: -20 %.
+- Cambio de formato (v7) y del lazo de planos del reproductor.
+- **Solo si H24 muestra que variar por escena rinde.**
+
+---
+
+## Orden recomendado (revisado 2026-09-13)
 
 ```
-H8  fabricacion (porton)          ── si falla, seguir igual con la rama A
-H9  ADPCM                         ── barato, ya escrito
-H10 saltar columnas vacias        ── mejor relacion trabajo/beneficio
-H11 opcode de bloque crudo        ── mata los picos
-H12 vector de movimiento global   ── el mas prometedor para imagen real
-H13 + H14 reproductor aparte + trackloader
-H15 12 o 13 sectores
-H16/H17 mas colores (medir primero)
+H19-H23 automatizar         ── barato, se nota en cada video que se codifica
+H10  saltar columnas vacias ── solo reproductor, libera CPU
+H24  cadencia por escena    ── medir primero; si rinde, H25
+H9   terminar ADPCM         ── reproductor + medir el llenado
+H11  opcode de bloque crudo ── mata los picos
+H8 -> H13 + H14 -> H15      ── solo si se pueden grabar formatos no estandar
+H16  HAM6                   ── solo material casi quieto, medir primero
 ```
 
-La rama A va primero **aunque H8 salga bien**: da calidad sin depender de
-hardware nuevo, y ademas libera la CPU que H14 necesita para leer mientras
-reproduce.
+El orden anterior ponia H8 primero. Cambio por dos motivos: el formato v6
+ya se probo en la A500 real, asi que la rama sin hardware nuevo tiene base
+firme; y la rama D mejora **todos** los discos que se hagan de aca en
+adelante sin tocar el formato.
+
+La rama A sigue yendo antes que la B aunque H8 salga bien: libera la CPU
+que H14 necesita para leer mientras reproduce.
+
+### Ideas sueltas, sin hito
+
+- **Estereo de verdad:** L por AUD0 y R por AUD1. El doble de bytes de
+  audio y de CPU de llenado.
+- **`--filtro on|off`:** hoy el reproductor enciende siempre el filtro del
+  LED. Con 11 kHz o pcm8 conviene poder apagarlo. Byte de cabecera, sin
+  decidir.
 
 ---
 

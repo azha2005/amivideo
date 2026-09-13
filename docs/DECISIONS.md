@@ -1903,6 +1903,21 @@ pero no explican lo que faltaba.
 
 ---
 
+## 2026-09-13 — Formato v6 en la A500 real
+
+Az grabo `delorean_32c_mh2_pcm11k.adf` y lo probo en su A500. Es el disco
+que mas cosas nuevas junta desde el Hito 7: formato v6, 32 colores (5
+planos), franjas parciales de paleta de 8 filas, copia del buffer visible
+con el Blitter (`--predict auto`) y audio pcm8 a 11 015 Hz. Az no reporto
+diferencias con WinUAE. Como en el Hito 7, no hay mediciones propias del
+hardware real (tiempos, sincronia): la verificacion byte a byte sigue
+siendo la de WinUAE y el decoder de referencia.
+
+Con esto la hoja de ruta cambia de orden (`ROADMAP.md`, revision del
+2026-09-13): la rama que no necesita hardware nuevo tiene base probada.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
