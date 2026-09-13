@@ -455,14 +455,14 @@ entry:
         ; buffer oculto y se pide el intercambio para su VBL; la
         ; interrupcion lo hace. Si llega tarde se ve tarde, y las
         ; repeticiones que siguen absorben el atraso.
+        ; H23: el reloj (V_START) y el audio arrancan recien cuando el frame
+        ; 0 esta dibujado. Pintar la pantalla entera tarda mas de 2 VBL, y
+        ; con el reloj andando el primer frame se veia 3 o 4 VBL tarde.
         move.w  #1,V_HIDDEN(a4)               ; se ve el 0, se dibuja en el 1
         clr.w   V_PENDING(a4)
         clr.w   V_DIRTY(a4)
         clr.w   V_DIRTY+2(a4)
-        move.l  V_VBL(a4),d0
-        addq.l  #2,d0
-        move.l  d0,V_START(a4)
-        move.w  V_AFMT(a4),V_AGO(a4)          ; despues de fijar V_START
+        clr.l   V_START(a4)                   ; 0 = el reloj no arranco
 
         lea     header(pc),a0
         move.l  20(a0),d5                     ; d5 = paquetes
@@ -532,6 +532,10 @@ entry:
 .notmax:
         endc
 
+        tst.l   V_START(a4)                   ; H23: primer delta ya dibujado
+        bne.s   .clockon
+        bsr     start_clock
+.clockon:
         move.w  V_HIDDEN(a4),d1               ; pedir el intercambio
         add.w   d1,d1
         add.w   d1,d1
@@ -544,6 +548,10 @@ entry:
         eor.w   #1,V_HIDDEN(a4)
 
 .advance:
+        tst.l   V_START(a4)                   ; un video que empieza con una
+        bne.s   .clockok                      ; REPETICION (el encoder no lo
+        bsr     start_clock                   ; genera) tambien arranca
+.clockok:
         moveq   #0,d0
         move.w  (a5),d0
         add.l   d0,a5
@@ -584,6 +592,20 @@ entry:
         endc
 .forever:
         bra.s   .forever
+
+;----------------------------------------------------------------------
+; start_clock - H23: fija el VBL en que se ve el frame 0 y deja que la
+; interrupcion arranque el audio en ese mismo VBL. Dos VBL de margen, como
+; antes: con uno, un VBL que cae entre la lectura y el pedido de
+; intercambio haria llegar tarde al frame 0. V_START antes que V_AGO,
+; porque la interrupcion lee V_AGO primero. Usa d0.
+;----------------------------------------------------------------------
+start_clock:
+        move.l  V_VBL(a4),d0
+        addq.l  #2,d0
+        move.l  d0,V_START(a4)
+        move.w  V_AFMT(a4),V_AGO(a4)
+        rts
 
 ;----------------------------------------------------------------------
 ; Errores: el color se reescribe en un lazo para que el copper list del

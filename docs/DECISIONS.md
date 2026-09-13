@@ -1949,6 +1949,38 @@ temporal, y 32 colores ya casi no deja error de color (0,5-1 %).
 
 ---
 
+## 2026-09-13 — H23: el reloj arranca con el primer frame ya dibujado
+
+**Problema.** El reproductor fijaba el VBL del frame 0 (`V_START`) dos VBL
+despues de tomar el hardware y recien entonces dibujaba el frame 0. Con 32
+colores y la pantalla entera eso son ~100 ms (5 VBL): en casi todos los
+discos de esta semana el frame 0 llegaba 2-4 VBL tarde, y como es un corte
+de escena, a veces el encoder lo degradaba.
+
+**Cambio.** El reproductor dibuja el primer delta con el reloj parado
+(`V_START` = 0) y recien despues llama a `start_clock`, que fija `V_START`
+dos VBL adelante y arranca el audio en ese VBL. El encoder simula igual: el
+frame 0 no tiene apuro ni llenados de audio encima, y el frame 1 empieza a
+dibujarse en el VBL del 0. La reconstruccion de `a500vp-dec --measure`
+tambien. **El formato no cambia**; la espera antes del video crece lo que
+tarda en dibujarse un frame (~0,1 s).
+
+**Medido.** Prediccion del encoder, antes y despues, con presupuesto de
+disco:
+
+| clip | antes | despues |
+|---|---|---|
+| Evangelion 10 s, 32c mh5 | 1 tarde, frame 0 por 2 VBL | **0 tarde** |
+| melissa 16 s, 32c mh3 | 5 tarde, frame 0 por 3 VBL, 3 degradados | 4 tarde, el peor por 1 VBL, 2 degradados; 5,47 % -> 5,39 % |
+
+**Verificado en WinUAE** con el disco de medicion (`build.ps1 play`,
+Evangelion 10 s, 32c mh5, sin perdida): 500 VBL para 500 esperados, **0
+frames tarde** (la reconstruccion tambien da 0), el audio arranca 0,12 ms
+despues del VBL del frame 0, y los CRC de los dos framebuffers al final
+son identicos a los del decoder de referencia.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

@@ -585,9 +585,11 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
     size_t last_delta = 0;
     size_t vis_frame = 0;     /* H22: de que frame es el ideal que se ve */
     /* Linea de tiempo del reproductor, en ciclos de CPU, con el origen en el
-     * VBL del frame 0. El reproductor empieza a decodificar 2 VBL antes. */
+     * VBL del frame 0. H23: el reloj arranca recien con el frame 0 dibujado,
+     * asi que el frame 0 nunca llega tarde y el 1 se empieza a dibujar en el
+     * VBL del 0. */
     double P = A5_CYC_PER_VBL;
-    double t_free = -2.0 * P;
+    double t_free = 0;
     int afmt = au ? au->format : A5V_AUDIO_NONE;
     double fillp = afmt ? 2.0 * A5_AUD_BUF_SAMPLES * au->period : 1.0;
     double fillc = (double)a5_audio_fill_cost(afmt);
@@ -672,15 +674,21 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
          * delta escribe tgt entero), asi que la eleccion es frame por frame
          * y no arrastra estado. */
         best = &ca;
-        if (g_predict != A5_PRED_VISIBLE)
-            try_delta(&ca, hid, ideal, pal, planes, y0, y1, thr, 0,
-                      cyc_limit, max_late, t_free, due, P, fillp, fillc);
-        if (g_predict != A5_PRED_HIDDEN) {
-            predict_copy(pred, hid, vis, y0, y1);
-            try_delta(&cb, pred, ideal, pal, planes, y0, y1, thr, copy_cyc,
-                      cyc_limit, max_late, t_free, due, P, fillp, fillc);
-            if (g_predict == A5_PRED_VISIBLE || cand_better(&cb, &ca))
-                best = &cb;
+        {
+            /* El frame 0 se dibuja antes de que arranque el reloj: sin
+             * apuro, y sin llenados de audio en el medio. */
+            double tf = n == 0 ? -1e15 : t_free;
+            if (g_predict != A5_PRED_VISIBLE)
+                try_delta(&ca, hid, ideal, pal, planes, y0, y1, thr, 0,
+                          cyc_limit, max_late, tf, due, P, fillp, fillc);
+            if (g_predict != A5_PRED_HIDDEN) {
+                predict_copy(pred, hid, vis, y0, y1);
+                try_delta(&cb, pred, ideal, pal, planes, y0, y1, thr,
+                          copy_cyc, cyc_limit, max_late, tf, due, P, fillp,
+                          fillc);
+                if (g_predict == A5_PRED_VISIBLE || cand_better(&cb, &ca))
+                    best = &cb;
+            }
         }
         late = best->late;
 

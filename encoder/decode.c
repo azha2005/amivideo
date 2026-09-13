@@ -268,7 +268,8 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
 
     /* Cuantos llenados de audio cayeron dentro de cada delta. Se reconstruye
      * la linea de tiempo del reproductor con los tiempos medidos: el primer
-     * delta empieza 2 VBL antes del frame 0, y cada uno de los siguientes en
+     * delta se dibuja antes de que arranque el reloj (H23), asi que termina
+     * antes del frame 0 y no llega tarde; cada uno de los siguientes empieza en
      * el VBL en que se intercambio el anterior (el que le tocaba, o el
      * primero despues de terminar si llego tarde). Contar los frames tarde
      * de la reconstruccion y compararlos con los de la Amiga la valida. */
@@ -277,12 +278,14 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
     if (!y || !fills) die("sin memoria");
     {
         double F = MEAS_CCK_FRAME, vs = (double)be32(in + 96);
-        double start = (vs - 2) * F;
+        double start = vs * F;
         int late = 0, nf = 0;
 
         for (i = 0; i < np; i++) {
             double due = vs + 2.0 * pt[i].n;           /* VBL en que se ve */
-            double end = start + pt[i].cycles / 2;     /* en color clocks */
+            double end;
+            if (pt[i].n == 0) start = vs * F - pt[i].cycles / 2 - 1;
+            end = start + pt[i].cycles / 2;            /* en color clocks */
             double sw = ceil(end / F);
             if (sw < due) sw = due;
             if (sw > due) late++;
