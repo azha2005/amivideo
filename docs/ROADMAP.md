@@ -22,7 +22,8 @@ que medirlas antes de darlas por buenas.**
 | `--audio-channel` | **hecho**: la mezcla L+R borraba un agudo en contrafase (house) |
 | H17 16 colores con franjas | **obsoleto**: lo resolvio H18 |
 | H8, H10, H11, H13-H16 | pendientes |
-| H19-H25 | nuevos, ver abajo |
+| H19-H23 (rama D) | **hechos** el 2026-09-13, ver abajo |
+| H24-H25 | nuevos, ver abajo |
 
 ---
 
@@ -273,13 +274,19 @@ borde derecho, en vez de al principio de la propia.
 
 ---
 
-## Rama D: que el encoder decida solo (2026-09-13)
+## Rama D: que el encoder decida solo  **[HECHA 2026-09-13]**
 
 Salio de codificar videos reales uno tras otro: en casi todos hubo que
 hacer a mano lo mismo. **Ninguno de estos hitos cambia el formato ni el
 reproductor** (salvo H23, que toca el reproductor sin tocar el formato).
 
-### H19 — Preparar la fuente sola
+### H19 — Preparar la fuente sola  **[HECHO]**
+
+Hecho distinto de lo planeado: no con `decimate` sino sacando los repetidos
+de los frames ya decodificados, porque 23,976 -> 25 no tiene ciclo entero.
+Detecta tambien 20 -> 25 (whoo). De paso, rutas con Unicode. Ver
+`DECISIONS.md`.
+
 
 Detectar y corregir lo que hoy se arregla con ffmpeg antes de codificar:
 
@@ -293,7 +300,7 @@ Detectar y corregir lo que hoy se arregla con ffmpeg antes de codificar:
 Se detecta con la diferencia entre frames consecutivos (`tblend` +
 `signalstats`), que es como se hizo a mano. Opcion `--source auto|raw`.
 
-### H20 — Audio automatico
+### H20 — Audio automatico  **[HECHO]**
 
 - **Canal:** medir la energia de L+R contra L-R por banda. Si arriba de
   2 kHz la contrafase esta a menos de ~4 dB, usar un solo canal (house:
@@ -303,14 +310,14 @@ Se detecta con la diferencia entre frames consecutivos (`tblend` +
 - **Formato:** si despues del control de tasa sobra disco para pcm8, usarlo
   (delorean: de 8 a 35 dB con los bytes que sobraban).
 
-### H21 — Busqueda de configuracion (`--auto`)
+### H21 — Busqueda de configuracion (`--auto`)  **[HECHO]**
 
 Codificar en paralelo colores x min-hold, que es el barrido que se corrio a
 mano en cada video, y proponer las 3-4 mejores con su error, bytes y frames
 tarde. La maquina de Az tiene 16 nucleos: un barrido de 8 configuraciones
 de 20 s tarda unos minutos.
 
-### H22 — Un error que no engane
+### H22 — Un error que no engane  **[HECHO]**
 
 El "% de pixeles a mas de 0,10" mezcla dos cosas: color (cuantizacion) y
 tiempo (imagen sostenida mientras la fuente se mueve). En Doctor Who los
@@ -318,7 +325,10 @@ discos **sin perdida** marcaban 45-50 %, y el numero no servia para elegir.
 Reportar las dos partes por separado: contra el frame ideal cuantizado y
 contra el frame fuente del mismo instante.
 
-### H23 — El primer frame no llega tarde
+### H23 — El primer frame no llega tarde  **[HECHO]**
+
+Verificado en WinUAE con el disco de medicion: 0 frames tarde.
+
 
 En casi todos los discos el frame 0, que pinta la pantalla entera, llega 3
 o 4 VBL tarde. El reproductor puede dibujarlo **antes** de arrancar el audio
@@ -364,7 +374,7 @@ escribiria igual: no ahorra nada.
 ## Orden recomendado (revisado 2026-09-13)
 
 ```
-H19-H23 automatizar         ── barato, se nota en cada video que se codifica
+H19-H23 automatizar         ── HECHO el 2026-09-13
 H10  saltar columnas vacias ── solo reproductor, libera CPU
 H24  cadencia por escena    ── medir primero; si rinde, H25
 H9   terminar ADPCM         ── reproductor + medir el llenado
