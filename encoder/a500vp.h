@@ -131,4 +131,9 @@ int      a5_pclose(FILE *f);
 char   **a5_utf8_args(int *argc, char **argv);
 FILE    *a5_fopen(const char *path, const char *mode);
 
+/* Lanzar un comando sin leer su salida (a5_pclose espera que termine), y la
+ * ruta del ejecutable propio. Los usa --auto. */
+FILE    *a5_spawn(const char *cmd);
+void     a5_self_path(char *buf, size_t size, const char *argv0);
+
 #endif /* A500VP_H */

@@ -74,6 +74,28 @@ FILE *a5_fopen(const char *path, const char *mode)
 #endif
 }
 
+static FILE *open_pipe(const char *cmd, const char *mode);
+
+/* Lanza un comando (con su propia redireccion) y devuelve el pipe: cerrarlo
+ * con a5_pclose espera a que termine. Para correr varios en paralelo. */
+FILE *a5_spawn(const char *cmd)
+{
+    return open_pipe(cmd, "r");
+}
+
+/* Ruta del ejecutable propio, en UTF-8. */
+void a5_self_path(char *buf, size_t size, const char *argv0)
+{
+#ifdef _WIN32
+    wchar_t w[1024];
+    DWORD n = GetModuleFileNameW(NULL, w, 1024);
+    if (n > 0 && n < 1024 &&
+        WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, (int)size, NULL, NULL) > 0)
+        return;
+#endif
+    snprintf(buf, size, "%s", argv0);
+}
+
 static FILE *open_pipe(const char *cmd, const char *mode)
 {
     FILE *f;

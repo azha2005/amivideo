@@ -2103,6 +2103,38 @@ UTF-16 y lo pasan a UTF-8, y los pipes y archivos se abren con `_wpopen` y
 
 ---
 
+## 2026-09-13 — H21: `--auto`, la busqueda de configuracion
+
+**Que hace.** Lanza el propio encoder 15 veces (32, 16 y 8 colores x
+`--min-hold` 2 a 6) en paralelo, de a `NUMBER_OF_PROCESSORS - 1`, cada uno
+con su salida a un archivo temporal y el presupuesto del disco final. Lee
+de cada salida el error contra la fuente y su reparto (H22), los frames
+tarde, el audio (H20) y el margen, muestra la tabla y codifica la elegida
+con las salidas pedidas. Todas las demas opciones pasan tal cual; si no se
+dio `--band-rows`, usa 8 con 16 y 32 colores y 16 con 8.
+
+**Criterio.** Entre las que entran y no pasan de `--max-late` VBL de
+atraso, la de menos pixeles lejos de la fuente; pero si una con mas colores
+esta a menos de **2 puntos**, esa. La tolerancia sale de las elecciones de
+Az: con house eligio 32 colores con `--min-hold 4` (8,89 %) sobre 16 colores
+con `--min-hold 3` entero (7,62 %), o sea 1,3 puntos por mas colores. Con 1
+punto, en "See You in 30 Years" elegia 8 colores (12,12 %) sobre 16 (14,15 %).
+Es una preferencia, no una medicion: la tabla queda impresa para decidir
+otra cosa.
+
+**Medido.** Con 16 nucleos, las 15 configuraciones de un clip de 17 s mas la
+codificacion final tardan **22 s**. Los resultados coinciden con los
+barridos a mano de los dias anteriores (mismas cifras de error y de margen
+para las mismas configuraciones), y el disco elegido pasa la verificacion
+del decoder de referencia.
+
+| clip | elegida | la de menos error |
+|---|---|---|
+| See You in 30 Years 7:45, 17 s | 8 colores mh2, 12,12 % (con tolerancia de 1 punto) | la misma |
+| whoo entero | 32 colores mh4, 14,52 % | 16 colores mh3, 12,68 % |
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

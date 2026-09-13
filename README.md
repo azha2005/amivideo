@@ -104,6 +104,30 @@ Queda todo en `work\`:
 
 ### 1. Codificar
 
+La forma fácil es `--auto`: prueba 32, 16 y 8 colores con `--min-hold` de 2
+a 6 en paralelo, muestra una tabla y codifica la elegida.
+
+```powershell
+.\work\a500vp-enc.exe --auto --in 'C:\Videos\mi_video.mp4' `
+  --start 44 --duration 12 --sharpen 0 `
+  --out work\mi_video.a5v --adf work\mi_video.adf `
+  --boot work\boot.bin --player work\player.bin
+```
+
+```
+  colores  hold  img/s   error   (colores/sostenida/compresion)  tarde      audio        disco
+       32     4    6.2  14.52%  (3.06/11.02/0.44)     0, 0 VBL  fib4 22.3 dB  sobran 2 KB <- elegida
+       16     3    8.3  12.68%  (4.07/ 8.61/0.01)     1, 1 VBL  fib4 22.3 dB  sobran 0 KB
+        8     2   12.5  14.04%  (9.76/ 4.28/0.00)     0, 0 VBL  fib4 22.3 dB  sobran 41 KB
+```
+
+Elige la de menos error entre las que entran y llegan a tiempo, pero si
+una con más colores está a menos de 2 puntos, prefiere esa. El número no lo
+dice todo: mirá el reparto (cuánto error viene de los colores, cuánto de
+sostener la imagen y cuánto de la compresión) y la preview.
+
+Para elegir a mano:
+
 ```powershell
 .\work\a500vp-enc.exe --in 'C:\Videos\mi_video.mp4' `
   --start 44 --duration 12 `
@@ -117,6 +141,7 @@ En la salida, fijate en tres líneas:
 ```
 presupuesto: 888832 bytes, entra por 77068       ← tiene que decir "entra"
 vs. fuente : error 0.0492; 6.66% de los pixeles  ← cuanto menos, mejor
+  de esos  : 0.5% por colores, 6.1% por imagen sostenida, 0.1% por compresion
 tiempo real: ... el peor por 2 VBL               ← 2 o menos está bien
 ```
 
