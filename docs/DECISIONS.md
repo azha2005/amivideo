@@ -1869,6 +1869,40 @@ codigo. Es una decision de encuadre, no de ingenieria.
 
 ---
 
+## 2026-09-13 — Audio: la mezcla a mono borraba un elemento en contrafase
+
+**Sintoma.** En house.mp4 Az no escuchaba el agudo caracteristico de la
+intro en ninguna prueba: ni fib4, ni pcm8, ni ADPCM, ni a 16 kHz, ni sin
+filtros. Tampoco en `oir_0`, que era la fuente sin codec.
+
+**Causa.** El encoder pedia el audio a ffmpeg con `-ac 1`, que suma L+R.
+Energia por banda de los primeros 6 s (dB relativos a fondo de escala):
+
+| banda | L+R | L-R | L | R |
+|---|---|---|---|---|
+| 0-2 kHz | -27,1 | -38,3 | -26,7 | -27,0 |
+| 2-4 kHz | -36,9 | -38,3 | -34,6 | -34,5 |
+| 4-6 kHz | -42,5 | -43,6 | -40,4 | -39,7 |
+| 6-8 kHz | -46,0 | -49,6 | -44,9 | -44,0 |
+
+Arriba de 2 kHz la parte en contrafase es casi tan fuerte como la parte en
+fase. **Prueba de escucha de Az** (6 s, sin codec ni filtros): no lo oye en
+la suma; si lo oye en solo izquierdo, solo derecho, solo L-R y el estereo
+original. El elemento esta en contrafase y la suma lo cancela.
+
+**Decision.** `--audio-channel mix|left|right` (mix por defecto, como
+antes). left/right usan `pan=mono|c0=c0` / `c0=c1`, por indice para que
+left ande tambien con fuentes mono. No cuesta bytes ni CPU. Verificado: el
+audio decodificado de un stream con `left` (ADPCM 16 kHz) correlaciona
+0,983 con el canal izquierdo de la fuente arriba de 2 kHz, y 0,649 con la
+suma.
+
+Todas las pruebas de codec anteriores (fib4 vs ADPCM, frecuencia,
+pre-enfasis) partian de la suma: siguen valiendo para la calidad general,
+pero no explican lo que faltaba.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

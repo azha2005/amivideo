@@ -101,11 +101,11 @@ typedef struct {
  * donde corresponde despues de acelerar. */
 static void encode_audio(A5Audio *au, const char *in, double start,
                          double duration, double speed, size_t nframes,
-                         double gain)
+                         double gain, const char *afilter)
 {
     int rate = (int)ceil(au->hz / speed);
     double step = speed * rate / au->hz;   /* muestras de ffmpeg por muestra */
-    FILE *f = a5_open_audio(in, start, duration, NULL, rate);
+    FILE *f = a5_open_audio(in, start, duration, afilter, rate);
     int16_t *raw = NULL;
     size_t nraw = 0, cap = 0, i;
     float *x;
@@ -776,6 +776,9 @@ static void usage(void)
 "                          cercano y su frecuencia exacta (8006,5)\n"
 "  --audio-period N        periodo de Paula, en lugar de --audio-rate (443)\n"
 "  --audio-gain F          ganancia antes de pasar a 8 bits (1.0)\n"
+"  --audio-channel C       mix | left | right (mix). mix suma los canales y\n"
+"                          borra lo que esta en contrafase; left o right\n"
+"                          lo conserva\n"
 "  --repeat-boost F        cuanto mas permisivo es repetir que actualizar (1.5)\n");
     /* Partido en dos: un solo literal pasaba los 4095 caracteres que C99
      * obliga a soportar, y -pedantic avisa. */
@@ -847,6 +850,7 @@ int main(int argc, char **argv)
     int    audio_period = 443;
     int    audio_format = -1;       /* -1 = fib4 si la fuente tiene audio */
     double audio_gain = 1.0;
+    const char *audio_filter = NULL;   /* NULL = mezcla L+R (-ac 1) */
     const char *adf_path = NULL;
     const char *boot_path = "work\\boot.bin", *player_path = "work\\player.bin";
     int    reserve_tail = 0;
@@ -912,6 +916,15 @@ int main(int argc, char **argv)
             audio_period = (int)(A5_CCK_PAL / r + 0.5);
         }
         else if (!strcmp(a, "--audio-gain") && has)    audio_gain = atof(argv[++i]);
+        else if (!strcmp(a, "--audio-channel") && has) {
+            /* Por indice y no por nombre (FL/FR): asi left anda tambien con
+             * una fuente mono, donde el unico canal es FC. */
+            const char *v = argv[++i];
+            if (!strcmp(v, "mix"))        audio_filter = NULL;
+            else if (!strcmp(v, "left"))  audio_filter = "pan=mono|c0=c0";
+            else if (!strcmp(v, "right")) audio_filter = "pan=mono|c0=c1";
+            else die("--audio-channel: mix, left o right");
+        }
         else if (!strcmp(a, "--audio-format") && has) {
             const char *v = argv[++i];
             if (!strcmp(v, "fib4"))      audio_format = A5V_AUDIO_FIB4;
@@ -1174,7 +1187,7 @@ int main(int argc, char **argv)
     if (au.format != A5V_AUDIO_NONE) {
         encode_audio(&au, in, start, duration,
                      pal_speedup ? A5_VIDEO_FPS / src.fps : 1.0, nframes,
-                     audio_gain);
+                     audio_gain, audio_filter);
         printf("audio      : %s, periodo %d = %.3f Hz, %lu muestras (%.3f s), "
                "%lu bytes = %.2f KB/s\n",
                au.format == A5V_AUDIO_FIB4 ? "fib4"
