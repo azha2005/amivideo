@@ -186,21 +186,26 @@ La lista completa sale con `.\work\a500vp-enc.exe --help`.
 
 ---
 
-## Fuentes de película o TV (telecine)
+## Fuentes convertidas de otra frecuencia
 
-Si la fuente viene a 29,97 fps con telecine, conviene sacar los frames
-repetidos antes de codificar:
+Muchos videos traen frames repetidos porque alguien los convirtió de una
+frecuencia a otra: telecine (29,97 desde 24), PAL subido a 30, película de
+24 pasada a 25, animación de 20 fps subida a 25. El encoder los detecta
+solo y los saca antes de codificar (`--source auto`, por defecto):
 
-```powershell
-ffmpeg -ss 167 -t 14 -i 'pelicula.mp4' -vf decimate -fps_mode cfr -r 24000/1001 `
-  -c:v libx264 -crf 14 -c:a aac -b:a 192k work\clip.mp4
+```
+fuente     : 1 frame repetido cada 6 (97% de los intervalos regulares):
+             se sacan 99 de 600, 30.000 -> 25.050 fps
 ```
 
-Para ver si hace falta, contá los frames duplicados:
+Si por algún motivo no querés que toque la fuente, usá `--source raw`.
 
-```powershell
-ffmpeg -i 'pelicula.mp4' -vf mpdecimate -an -f null -
-```
+Las fuentes de 50 o 60 fps **interpoladas** no tienen repetidos y no tienen
+arreglo automático: el encoder avisa. Si existe la versión original a 24 o
+25 fps, conviene usar esa.
+
+Los nombres de archivo con caracteres Unicode (como los `｜` que ponen
+yt-dlp y otros) funcionan directo.
 
 ---
 

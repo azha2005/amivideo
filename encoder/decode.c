@@ -32,7 +32,7 @@ static unsigned be16(const uint8_t *p) { return (unsigned)(p[0] << 8) | p[1]; }
 
 static uint8_t *slurp(const char *path, size_t *len)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = a5_fopen(path, "rb");
     uint8_t *b;
     long n;
 
@@ -149,7 +149,7 @@ static void put_le(FILE *f, uint32_t v, int bytes)
 
 static void write_wav(const char *path, const int8_t *s, size_t n, int rate)
 {
-    FILE *f = fopen(path, "wb");
+    FILE *f = a5_fopen(path, "wb");
     uint32_t datalen = (uint32_t)n * 2;
     size_t i;
 
@@ -574,12 +574,12 @@ static void write_still(const char *out, int planes, int ncolors, int y0,
     a5buf_write(&file, delta.p, delta.len);
     if (raw != plen) a5buf_put8(&file, 0);
 
-    f = fopen(out, "wb");
+    f = a5_fopen(out, "wb");
     if (!f || fwrite(file.p, 1, file.len, f) != file.len) die("no pude escribir el frame fijo");
     fclose(f);
 
     snprintf(path, sizeof path, "%s.fb", out);
-    f = fopen(path, "wb");
+    f = a5_fopen(path, "wb");
     if (!f) die("no pude escribir el framebuffer esperado");
     for (p = 0; p < planes; p++) {
         for (y = 0; y < A5_H; y++) {
@@ -594,7 +594,7 @@ static void write_still(const char *out, int planes, int ncolors, int y0,
     fclose(f);
 
     snprintf(path, sizeof path, "%s.ppm", out);
-    f = fopen(path, "wb");
+    f = a5_fopen(path, "wb");
     if (!f) die("no pude escribir la imagen de referencia");
     fprintf(f, "P6\n%d %d\n255\n", A5_DISP_W, A5_DISP_H);
     for (y = 0; y < A5_DISP_H; y++) {
@@ -658,6 +658,7 @@ int main(int argc, char **argv)
     int ncopy = 0;
     uint32_t n;
 
+    argv = a5_utf8_args(&argc, argv);    /* rutas con Unicode */
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
         int has = i + 1 < argc;

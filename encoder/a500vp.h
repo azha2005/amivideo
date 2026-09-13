@@ -125,4 +125,10 @@ FILE    *a5_open_preview(const char *out, int w, int h, double fps,
 
 int      a5_pclose(FILE *f);
 
+/* Nombres de archivo con Unicode en Windows: argv en UTF-8 (reemplaza al
+ * argv de main) y fopen que acepta rutas en UTF-8. En otros sistemas no
+ * hacen nada distinto. */
+char   **a5_utf8_args(int *argc, char **argv);
+FILE    *a5_fopen(const char *path, const char *mode);
+
 #endif /* A500VP_H */

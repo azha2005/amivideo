@@ -2037,6 +2037,72 @@ muestras de audio identicas).
 
 ---
 
+## 2026-09-13 — H19: frames repetidos de la conversion de la fuente
+
+**Que hace.** Con `--source auto` (por defecto), despues de decodificar y
+escalar la fuente se buscan frames repetidos a intervalos regulares y se
+sacan; la frecuencia de la fuente se recalcula con los que quedan, asi la
+duracion y el audio no cambian. `--source raw` lo apaga.
+
+**Deteccion.** Diferencia media absoluta entre frames consecutivos en el
+area activa. Un frame es candidato si su diferencia esta bajo el 10 % de la
+mediana (entre 0,05 y 0,3). Hay patron si la mediana del intervalo entre
+candidatos es 4 o mas y el 70 % de los intervalos cae a +-1 de ella. El
+anime animado en dos o en tres repite cada 2-3 frames y las imagenes quietas
+dan intervalos de 1: no pasan. Con el patron reconocido se lo sigue ciclo
+por ciclo: en cada uno se saca el frame mas parecido a intervalo +-1 del
+ultimo, si su diferencia esta bajo el 25 % de la mediana; si en un ciclo no
+hay ninguno (corte de escena), el patron sigue corriendo.
+
+**Dos intentos descartados:**
+
+1. `decimate=cycle=N` de ffmpeg con deteccion por fase fija. Sirve para 5
+   y 6, pero 23,976 -> 25 repite cada **24,4** frames: la fase se corre y el
+   tren no se detectaba (y decimate habria sacado frames buenos).
+2. Umbral fijo para sacar los repetidos: se perdia algunos por el ruido de
+   compresion (Caniggia 94 de 100, whoo 101 de 124). Seguir el patron ciclo
+   por ciclo los encuentra todos.
+
+**Medido** (fuentes crudas):
+
+| fuente | detectado | sacados | fps resultante |
+|---|---|---|---|
+| Caniggia, 30 fps | cada 6, 97 % regular | 99 de 600 | 25,050 |
+| el tren, 25 fps | cada 24, 93 % regular | 16 de 400 | 24,000 |
+| BTTF III, 29,97 fps | cada 5, 100 % regular | 84 de 420 | 23,976 |
+| whoo, 25 fps | cada 5, 84 % regular | 123 de 619 | 20,032 |
+| house, melissa, See You in 30 Years, delorean, Doctor Who | nada | 0 | sin cambio |
+| Evangelion, 59,94 fps | nada: aviso de posible interpolacion | 0 | sin cambio |
+
+whoo no estaba en la lista de sospechosos: verificado con `tblend` sobre la
+fuente, repite de verdad un frame cada 5 (0,02-0,28 contra 2-11 del
+resto). Era una animacion de 20 fps subida a 25.
+
+**Lo que mejora, y lo que no.** El "% de pixeles lejos de la fuente" no lo
+ve, porque compara contra el frame de la fuente de ese instante, y si ese
+es un repetido, mostrarlo congelado no cuenta como error (Caniggia 16c mh3
+22,5 s: 9,42 % crudo, 9,78 % corregido; whoo: 12,64 % contra 12,68 %). Lo
+que arregla es el **ritmo**. Con `--min-hold 1`, 3 colores, sin perdida,
+repeticiones en pantalla:
+
+| fuente | cruda | corregida | lo que corresponde |
+|---|---|---|---|
+| Caniggia 20 s | 15 (congelamientos: tirones) | **0** | 0 (25 fps en 24,96) |
+| BTTF III 14 s | 25, mal repartidas | **10** | 10 (23,976 en 24,96) |
+| whoo 24,8 s | 1 (los repetidos iban como deltas casi vacios) | 122 | ~124 (20 en 24,96) |
+
+En whoo el ritmo en pantalla es el mismo en los dos casos (los repetidos de
+la fuente ya estaban parejos); lo que se ahorra son los deltas de los
+repetidos.
+
+**Nombres con Unicode.** En la misma tanda: el nombre del archivo del tren
+lleva `｜` (U+FF5C) y el encoder no lo podia abrir (argv y `_popen` usan la
+pagina de codigos ANSI). Ahora `a500vp-enc` y `a500vp-dec` toman argv en
+UTF-16 y lo pasan a UTF-8, y los pipes y archivos se abren con `_wpopen` y
+`_wfopen`. Verificado con el archivo original del tren.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

@@ -54,7 +54,7 @@ static int even(int v) { return v & ~1; }
 
 static uint8_t *read_file(const char *path, size_t *len)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = a5_fopen(path, "rb");
     long n;
     uint8_t *p;
 
@@ -900,6 +900,129 @@ static size_t rc_try(RateCtl *rc, double thr)
     return total;
 }
 
+/* --- H19: preparar la fuente -------------------------------------------
+ * Muchas fuentes traen frames repetidos con un ritmo regular, porque alguien
+ * las convirtio de una frecuencia a otra repitiendo frames:
+ *
+ *   29,97 con telecine ya reconstruido: 1 repetido cada 5 (BTTF III)
+ *   PAL 25 subido a 30:                 1 repetido cada 6 (Caniggia)
+ *   23,976 pasado a 25:                 1 repetido cada 24,4 (el tren)
+ *
+ * Esos frames no son movimiento: rompen el ritmo de la imagen (un tiron por
+ * ciclo) y el encoder los pagaba como repeticiones mal ubicadas.
+ *
+ * Se trabaja sobre los frames ya decodificados (160x128, sin pasar otra vez
+ * por ffmpeg): un frame es "repetido" si su diferencia con el anterior es
+ * casi cero en terminos absolutos y muy chica contra lo que se mueve la
+ * fuente. El patron cuenta si los repetidos llegan a intervalos regulares:
+ * la mayoria de los intervalos a +-1 de la mediana, y la mediana de 4 o
+ * mas. El anime animado en dos o en tres tambien repite, pero cada 2 o 3
+ * frames, y las imagenes quietas dan intervalos de 1: no pasan.
+ *
+ * No se usa decimate=cycle=N de ffmpeg porque 23,976 -> 25 no tiene ciclo
+ * entero: la fase del repetido se corre y decimate sacaria frames buenos.
+ * Se sacan exactamente los repetidos que siguen el patron, y la frecuencia
+ * de la fuente se recalcula con los que quedan, asi la duracion no cambia. */
+typedef struct {
+    size_t removed;        /* frames sacados */
+    double interval;       /* mediana del intervalo entre repetidos */
+    double regular;        /* fraccion de intervalos a +-1 de la mediana */
+    int    interpolated;   /* aviso: mas de 50 fps sin repetidos */
+} SourceFix;
+
+static int cmp_double(const void *pa, const void *pb)
+{
+    double x = *(const double *)pa, y = *(const double *)pb;
+    return x < y ? -1 : x > y;
+}
+
+static size_t drop_pulldown(uint8_t **frames, size_t n, int y0, int y1,
+                            double fps, SourceFix *fx)
+{
+    size_t row0 = (size_t)y0 * A5_W * 3, len = (size_t)(y1 - y0) * A5_W * 3;
+    double *d, *sorted, med, thr;
+    size_t *dup, ndup = 0, i, k, out;
+    double *iv;
+    size_t niv = 0, near = 0;
+
+    memset(fx, 0, sizeof *fx);
+    if (n < 50 || len == 0) return n;
+    d = malloc(n * sizeof *d);
+    sorted = malloc(n * sizeof *sorted);
+    dup = malloc(n * sizeof *dup);
+    iv = malloc(n * sizeof *iv);
+    if (!d || !sorted || !dup || !iv) die("sin memoria");
+
+    d[0] = 1e9;
+    for (i = 1; i < n; i++) {
+        long sum = 0;
+        const uint8_t *pa = frames[i - 1] + row0, *pb = frames[i] + row0;
+        for (k = 0; k < len; k++) sum += abs((int)pa[k] - (int)pb[k]);
+        d[i] = (double)sum / len;
+    }
+    memcpy(sorted, d + 1, (n - 1) * sizeof *d);
+    qsort(sorted, n - 1, sizeof *sorted, cmp_double);
+    med = sorted[(n - 1) / 2];
+    thr = med * 0.1;
+    if (thr > 0.3)  thr = 0.3;
+    if (thr < 0.05) thr = 0.05;
+
+    for (i = 1; i < n; i++)
+        if (d[i] < thr) dup[ndup++] = i;
+    for (k = 1; k < ndup; k++) iv[niv++] = (double)(dup[k] - dup[k - 1]);
+
+    if (niv >= 4) {
+        memcpy(sorted, iv, niv * sizeof *iv);
+        qsort(sorted, niv, sizeof *sorted, cmp_double);
+        fx->interval = sorted[niv / 2];
+        for (k = 0; k < niv; k++)
+            if (fabs(iv[k] - fx->interval) <= 1.0) near++;
+        fx->regular = (double)near / niv;
+    }
+
+    if (fx->interval >= 4 && fx->regular >= 0.7) {
+        /* Con el patron reconocido, se lo sigue ciclo por ciclo: en cada uno
+         * se busca el frame mas parecido al anterior a intervalo +-1 del
+         * ultimo repetido, y se lo saca si su diferencia es chica contra lo
+         * que se mueve la fuente. El umbral absoluto de la deteccion se
+         * perdia algunos (Caniggia: 94 de 100, whoo: 101 de 124) por el
+         * ruido de compresion. Si en un ciclo no aparece ninguno (un corte
+         * de escena), el patron sigue corriendo sin sacar nada. */
+        double rel = med * 0.25 > thr ? med * 0.25 : thr;
+        size_t m = (size_t)(fx->interval + 0.5), pos = dup[0];
+        char *drop = calloc(n, 1);
+        if (!drop) die("sin memoria");
+        drop[pos] = 1;
+        fx->removed = 1;
+        for (;;) {
+            size_t lo = pos + m - 1, hi = pos + m + 1, j, best;
+            if (lo >= n) break;
+            if (hi >= n) hi = n - 1;
+            best = lo;
+            for (j = lo + 1; j <= hi; j++)
+                if (d[j] < d[best]) best = j;
+            if (d[best] < rel) {
+                drop[best] = 1;
+                fx->removed++;
+                pos = best;
+            } else {
+                pos += m;
+            }
+        }
+        for (i = 0, out = 0; i < n; i++) {
+            if (drop[i]) { free(frames[i]); continue; }
+            frames[out++] = frames[i];
+        }
+        free(drop);
+        n = out;
+    } else if (fps > 50) {
+        fx->interpolated = 1;
+    }
+
+    free(d); free(sorted); free(dup); free(iv);
+    return n;
+}
+
 static void usage(void)
 {
     printf(
@@ -951,6 +1074,9 @@ static void usage(void)
 "                          2 = 12,5 fps de imagenes distintas (2)\n"
 "  --start SEG             desde donde cortar la fuente (0)\n"
 "  --duration SEG          cuanto tomar; 0 = todo (0)\n"
+"  --source MODO           auto | raw (auto). auto busca frames repetidos a\n"
+"                          intervalos regulares (telecine, 25 subido a 30,\n"
+"                          24 pasado a 25) y los saca antes de codificar\n"
 "  --aspect MODO           letterbox | crop | stretch (letterbox)\n"
 "  --rate MODO             native | pal (native)\n"
 "                            native: repite frames para respetar la velocidad\n"
@@ -1006,6 +1132,7 @@ int main(int argc, char **argv)
     const char *audio_filter = NULL;   /* NULL = mezcla L+R (-ac 1) */
     int    audio_chan_auto = 1;
     int    audio_fmt_auto = 1;
+    int    source_auto = 1;         /* H19 */
     float *audio_x1 = NULL;         /* la entrada a ganancia 1, para H20 */
     const char *adf_path = NULL;
     const char *boot_path = "work\\boot.bin", *player_path = "work\\player.bin";
@@ -1020,6 +1147,7 @@ int main(int argc, char **argv)
     int i;
 
     A5SourceInfo src;
+    SourceFix srcfix;
     char vfilter[512];
     int cols, rows, x0, y0, y1;
     int ncolors;
@@ -1035,6 +1163,7 @@ int main(int argc, char **argv)
     int nscenes = 0;
     clock_t t0 = clock();
 
+    argv = a5_utf8_args(&argc, argv);    /* rutas con Unicode */
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
         int has = i + 1 < argc;
@@ -1063,6 +1192,12 @@ int main(int argc, char **argv)
             else die("--rate: native o pal");
         }
         else if (!strcmp(a, "--no-audio"))             want_audio = 0;
+        else if (!strcmp(a, "--source") && has) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "auto"))     source_auto = 1;
+            else if (!strcmp(v, "raw")) source_auto = 0;
+            else die("--source: auto o raw");
+        }
         else if (!strcmp(a, "--min-hold") && has)      min_hold = atoi(argv[++i]);
         else if (!strcmp(a, "--max-late") && has)      max_late = atoi(argv[++i]);
         else if (!strcmp(a, "--audio-period") && has)  audio_period = atoi(argv[++i]);
@@ -1284,6 +1419,27 @@ int main(int argc, char **argv)
     }
     a5_pclose(dec);
     if (nframes == 0) die("ffmpeg no devolvio ningun frame");
+
+    /* --- H19: frames repetidos de la conversion de la fuente --------- */
+    if (source_auto) {
+        size_t before = nframes;
+        nframes = drop_pulldown(frames, nframes, y0, y1, src.fps, &srcfix);
+        if (srcfix.removed) {
+            double nf = src.fps * (double)nframes / before;
+            printf("fuente     : 1 frame repetido cada %.0f (%.0f%% de los "
+                   "intervalos regulares):\n             se sacan %lu de "
+                   "%lu, %.3f -> %.3f fps\n", srcfix.interval,
+                   100 * srcfix.regular, (unsigned long)srcfix.removed,
+                   (unsigned long)before, src.fps, nf);
+            src.fps = nf;
+        } else if (srcfix.interpolated) {
+            printf("  AVISO: la fuente es de %.0f fps y no repite frames. Si "
+                   "es una version\n         interpolada de un original de "
+                   "24 o 25 fps, algunos frames van a\n         ser "
+                   "inventados por la interpolacion; si existe el original, "
+                   "mejor.\n", src.fps);
+        }
+    }
 
     /* --- cadencia ---------------------------------------------------
      * La Amiga solo puede cambiar de frame cada 2 VBL, o sea 24,960205 fps
@@ -1753,7 +1909,7 @@ int main(int argc, char **argv)
 
         /* --- escribir --------------------------------------------- */
         {
-            FILE *f = fopen(out, "wb");
+            FILE *f = a5_fopen(out, "wb");
             A5Buf hdr;
             char crcpath[1024];
 
@@ -1770,7 +1926,7 @@ int main(int argc, char **argv)
             /* Un CRC por frame y, si hay audio, uno mas de todo lo que suena
              * (docs/FORMAT.md, Verificacion). */
             snprintf(crcpath, sizeof crcpath, "%s.crc", out);
-            f = fopen(crcpath, "wb");
+            f = a5_fopen(crcpath, "wb");
             if (f) {
                 size_t n;
                 for (n = 0; n <= nframes; n++) {
@@ -1810,7 +1966,7 @@ int main(int argc, char **argv)
                 err = adf_assemble(disk, boot, bootlen, player, playerlen,
                                    data.p, data.len, reserve_tail, &lay);
                 if (err) die(err);
-                f = fopen(adf_path, "wb");
+                f = a5_fopen(adf_path, "wb");
                 if (!f || fwrite(disk, 1, ADF_SIZE, f) != ADF_SIZE)
                     die("no pude escribir el ADF");
                 fclose(f);

@@ -15,12 +15,64 @@
 #ifdef _WIN32
 #  include <io.h>
 #  include <fcntl.h>
-#  define POPEN  _popen
+#  include <wchar.h>
+#  include <windows.h>
 #  define PCLOSE _pclose
 #else
-#  define POPEN  popen
 #  define PCLOSE pclose
 #endif
+
+/* --- nombres de archivo con Unicode ---------------------------------------
+ * yt-dlp y compania ponen en los nombres caracteres como "｜" (U+FF5C). En
+ * Windows, argv y _popen/fopen usan la pagina de codigos ANSI y esos
+ * caracteres llegan como "?": ffprobe no encontraba el archivo. Por dentro
+ * todo va en UTF-8, y en el borde con Windows se pasa a UTF-16. */
+#ifdef _WIN32
+static wchar_t *to_wide(const char *s)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    wchar_t *w = n > 0 ? malloc((size_t)n * sizeof *w) : NULL;
+    if (w) MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    return w;
+}
+#endif
+
+char **a5_utf8_args(int *argc, char **argv)
+{
+#ifdef _WIN32
+    int n, i;
+    LPWSTR *w = CommandLineToArgvW(GetCommandLineW(), &n);
+    char **out;
+    if (!w) return argv;
+    out = calloc((size_t)n + 1, sizeof *out);
+    if (!out) return argv;
+    for (i = 0; i < n; i++) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, NULL, 0, NULL,
+                                      NULL);
+        out[i] = malloc(len > 0 ? (size_t)len : 1);
+        if (!out[i]) return argv;
+        WideCharToMultiByte(CP_UTF8, 0, w[i], -1, out[i], len, NULL, NULL);
+    }
+    LocalFree(w);
+    *argc = n;
+    return out;
+#else
+    (void)argc;
+    return argv;
+#endif
+}
+
+FILE *a5_fopen(const char *path, const char *mode)
+{
+#ifdef _WIN32
+    wchar_t *wp = to_wide(path), *wm = to_wide(mode);
+    FILE *f = wp && wm ? _wfopen(wp, wm) : NULL;
+    free(wp); free(wm);
+    return f;
+#else
+    return fopen(path, mode);
+#endif
+}
 
 static FILE *open_pipe(const char *cmd, const char *mode)
 {
@@ -28,15 +80,18 @@ static FILE *open_pipe(const char *cmd, const char *mode)
 #ifdef _WIN32
     size_t n = strlen(cmd);
     char *wrapped = malloc(n + 3);
+    wchar_t *wc, *wm;
     if (!wrapped) return NULL;
     wrapped[0] = '"';
     memcpy(wrapped + 1, cmd, n);
     wrapped[n + 1] = '"';
     wrapped[n + 2] = 0;
-    f = POPEN(wrapped, mode);
-    free(wrapped);
+    wc = to_wide(wrapped);
+    wm = to_wide(mode);
+    f = wc && wm ? _wpopen(wc, wm) : NULL;
+    free(wrapped); free(wc); free(wm);
 #else
-    f = POPEN(cmd, mode);
+    f = popen(cmd, mode);
 #endif
     return f;
 }
