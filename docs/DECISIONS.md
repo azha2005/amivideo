@@ -1918,6 +1918,37 @@ Con esto la hoja de ruta cambia de orden (`ROADMAP.md`, revision del
 
 ---
 
+## 2026-09-13 — H22: el error contra la fuente, separado por causa
+
+**Problema.** "% de pixeles a mas de 0,10 del original" mezclaba tres
+cosas y no servia para elegir configuracion: en Doctor Who los discos sin
+perdida marcaban 45-50 %.
+
+**Regla.** Cada pixel que se ve mal se atribuye a una causa, en este orden:
+
+1. **colores:** el frame cuantizado ideal de ese instante ya estaba a mas
+   de 0,10 de la fuente. Faltan colores; ni un disco infinito lo arregla.
+2. **imagen sostenida:** lo que se ve es exactamente el ideal del ultimo
+   frame que se escribio en el buffer visible. La fuente se movio y la
+   imagen no (repeticion, `--min-hold`, frame tarde).
+3. **compresion:** lo demas. Perdida del delta o degradacion por tiempo.
+
+Las tres suman el total, que no cambia. Es solo reporte del encoder: el
+bitstream sale identico.
+
+**Medido** (misma configuracion que los discos entregados):
+
+| clip | total | colores | sostenida | compresion |
+|---|---|---|---|---|
+| Evangelion, 32c mh5, 22 s | 11,80 % | 1,00 % | 10,42 % | 0,37 % |
+| Doctor Who, 8c mh6, 27 s | 44,96 % | 4,16 % | **40,80 %** | 0,01 % |
+| Tren 6:29, 32c mh4, 16 s | 25,82 % | 0,48 % | 21,04 % | 4,29 % |
+
+Confirma lo que se sospechaba mirando: en estos clips casi todo el error es
+temporal, y 32 colores ya casi no deja error de color (0,5-1 %).
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

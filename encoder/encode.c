@@ -220,6 +220,10 @@ typedef struct {
     uint32_t *crc;          /* uno por frame, del buffer visible */
     double src_err;         /* error de lo que se ve contra la fuente, sumado */
     long   src_bad;         /* pixeles que se ven a mas de A5_VISIBLE_ERR */
+    /* H22: de donde sale cada uno de esos pixeles (suman src_bad) */
+    long   bad_color;       /* ya estaba en la cuantizacion: faltan colores */
+    long   bad_motion;      /* imagen sostenida: es el ideal de un frame viejo */
+    long   bad_comp;        /* perdida del delta o degradacion por tiempo */
 } A5Stream;
 
 /* Checksum de un frame tal como se ve: los indices mas la paleta con la que
@@ -286,22 +290,38 @@ static long idx_bad(const uint8_t *a, const uint8_t *b, const A5Palette *pals,
 
 /* Error contra la fuente de lo que se ve. Es la medida que sirve para
  * comparar paletas distintas: el error contra el frame cuantizado ideal no,
- * porque el ideal cambia con la paleta. */
+ * porque el ideal cambia con la paleta.
+ *
+ * H22: cada pixel que se ve mal se atribuye a una causa, porque el total
+ * solo no sirve para elegir configuracion (en Doctor Who los discos sin
+ * perdida marcaban 45-50 % de pixeles malos). ideal es el frame cuantizado
+ * de este instante; shown es el ideal del frame que se escribio por ultima
+ * vez en el buffer visible. Si el ideal ya estaba lejos de la fuente,
+ * faltan colores; si lo que se ve es exactamente el ideal viejo, es la
+ * imagen sostenida; si no, es perdida de compresion. */
 static void src_account(A5Stream *st, const uint8_t *vis,
                         const A5Palette *pals, const uint8_t *rgb,
+                        const uint8_t *ideal, const uint8_t *shown,
                         int y0, int y1)
 {
+    double t2 = A5_VISIBLE_ERR * A5_VISIBLE_ERR;
     int y, x;
 
     for (y = y0; y < y1; y++) {
         const A5Palette *pal = rowpal(pals, y);
         const uint8_t *p = rgb + (size_t)y * A5_W * 3;
         const uint8_t *v = vis + (size_t)y * A5_W;
+        const uint8_t *id = ideal + (size_t)y * A5_W;
+        const uint8_t *sh = shown + (size_t)y * A5_W;
         for (x = 0; x < A5_W; x++, p += 3) {
-            double d = sqrt((double)a5_oklab_dist2(
-                a5_srgb_to_oklab(p[0], p[1], p[2]), pal->lab[v[x]]));
+            Oklab c = a5_srgb_to_oklab(p[0], p[1], p[2]);
+            double d = sqrt((double)a5_oklab_dist2(c, pal->lab[v[x]]));
             st->src_err += d;
-            if (d > A5_VISIBLE_ERR) st->src_bad++;
+            if (d <= A5_VISIBLE_ERR) continue;
+            st->src_bad++;
+            if (a5_oklab_dist2(c, pal->lab[id[x]]) > t2) st->bad_color++;
+            else if (v[x] == sh[x])                      st->bad_motion++;
+            else                                         st->bad_comp++;
         }
     }
 }
@@ -563,6 +583,7 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
     int s = 0;
     const A5Palette *vispal = NULL;
     size_t last_delta = 0;
+    size_t vis_frame = 0;     /* H22: de que frame es el ideal que se ve */
     /* Linea de tiempo del reproductor, en ciclos de CPU, con el origen en el
      * VBL del frame 0. El reproductor empieza a decodificar 2 VBL antes. */
     double P = A5_CYC_PER_VBL;
@@ -606,7 +627,8 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
             st->err_sum += idx_error(vis, ideal, pal, pal, y0, y1);
             st->bad_pixels += idx_bad(vis, ideal, pal, y0, y1);
             st->crc[n] = frame_crc(vis, fsz, pal, ncolors);
-            if (src) src_account(st, vis, pal, src[n], y0, y1);
+            if (src) src_account(st, vis, pal, src[n], ideal,
+                                 idx + vis_frame * fsz, y0, y1);
             continue;
         }
 
@@ -629,7 +651,8 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
                 st->err_sum += idx_error(vis, ideal, pal, pal, y0, y1);
                 st->bad_pixels += idx_bad(vis, ideal, pal, y0, y1);
                 st->crc[n] = frame_crc(vis, fsz, pal, ncolors);
-                if (src) src_account(st, vis, pal, src[n], y0, y1);
+                if (src) src_account(st, vis, pal, src[n], ideal,
+                                     idx + vis_frame * fsz, y0, y1);
                 continue;
             }
         }
@@ -686,11 +709,12 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         memcpy(hid, best->tgt, fsz);
         { uint8_t *t = vis; vis = hid; hid = t; }
         vispal = pal;
+        vis_frame = n;
 
         st->err_sum += idx_error(vis, ideal, pal, pal, y0, y1);
         st->bad_pixels += idx_bad(vis, ideal, pal, y0, y1);
         st->crc[n] = frame_crc(vis, fsz, pal, ncolors);
-        if (src) src_account(st, vis, pal, src[n], y0, y1);
+        if (src) src_account(st, vis, pal, src[n], ideal, ideal, y0, y1);
     }
 
     a5buf_free(&ca.video);
@@ -1641,6 +1665,12 @@ int main(int argc, char **argv)
                st.src_err / ((double)nframes * (y1 - y0) * A5_W),
                100.0 * st.src_bad / ((double)nframes * (y1 - y0) * A5_W),
                A5_VISIBLE_ERR);
+        {
+            double np = (double)nframes * (y1 - y0) * A5_W / 100.0;
+            printf("  de esos  : %.2f%% por colores, %.2f%% por imagen "
+                   "sostenida, %.2f%% por compresion\n", st.bad_color / np,
+                   st.bad_motion / np, st.bad_comp / np);
+        }
         if (budget > 0)
             printf("presupuesto: %ld bytes, %s por %ld\n", budget,
                    total <= (size_t)budget ? "entra" : "NO ENTRA",
