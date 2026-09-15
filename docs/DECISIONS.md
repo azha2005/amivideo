@@ -2243,6 +2243,54 @@ Los cinco pasan la verificacion del decoder de referencia.
 
 ---
 
+## 2026-09-15 — H27: `--size` y tamanos en `--auto`
+
+**Por que.** Achicar la imagen fue lo unico que saco los fantasmas y el
+granulado sin perder colores ni fluidez (ver la entrada de fantasmas). Se
+hacia a mano: escalar la fuente con ffmpeg, pegarle borde negro, bajar
+`--scene-threshold` en proporcion al area y corregir cada porcentaje del
+reporte. Az: "la idea es mejorar calidad de imagen/tamano y despues y solo
+despues audio".
+
+**`--size P`.** La imagen se escala al P % del cuadro, centrada con borde
+negro (en el mismo filtro de ffmpeg que el letterbox). Las filas del borde
+quedan fuera del area activa: no cuestan bytes, la copia con Blitter es mas
+corta y las franjas de paleta se reparten solo sobre la imagen. Las columnas
+del borde son negro exacto en la fuente y en el disco: se descuentan de la
+deteccion de cortes, de la de frames repetidos (H19) y de todos los
+porcentajes del reporte. Con borde se reserva el negro.
+
+Verificado con See30 al 68 %: 22 escenas con el umbral normal (0,12) y
+6,67 % contra la fuente, lo mismo que la correccion a mano de la fuente con
+borde (7,0 % con 61 filas en vez de 64).
+
+**`--auto`.** Suma `--size` 100, 90, 80, 70 y 60 (`--auto-sizes`) a colores
+x `--min-hold`: 75 configuraciones. Criterio, en orden:
+
+1. sirven las que entran sin subir el umbral y no pasan de `--max-late`;
+2. entre las que estan a 2 puntos de la de menos error, la de mas colores,
+   despues la mas grande, despues la de menos error;
+3. con la elegida se prueba la imagen de a 2 % mas grande hasta el tamano
+   siguiente de la lista, y queda la mas grande que sigue sirviendo;
+4. recien ahi el audio (H20, H26) usa lo que sobra.
+
+**Medido.** See30 (17 s, grano de pelicula, 16 nucleos): 75 + 4
+configuraciones en **81 s**. Elegida 32 colores `--min-hold 2` al **72 %**
+(a mano se habia llegado al 68 %); 74 % ya sube el umbral a 0,027. El audio
+se llevo lo que sobraba: fib4 a 11 kHz, quedan 10 KB. Verificacion del
+decoder de referencia OK.
+
+| tamano, 32 colores mh2 | umbral | sirve |
+|---|---|---|
+| 80 % | 0,0707 | no |
+| 78 % | 0,0625 | no |
+| 76 % | 0,0547 | no |
+| 74 % | 0,0272 | no |
+| **72 %** | **0** | **si** |
+| 70 % | 0 | si |
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

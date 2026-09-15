@@ -104,8 +104,10 @@ Queda todo en `work\`:
 
 ### 1. Codificar
 
-La forma fácil es `--auto`: prueba 32, 16 y 8 colores con `--min-hold` de 2
-a 6 en paralelo, muestra una tabla y codifica la elegida.
+La forma fácil es `--auto`: prueba 32, 16 y 8 colores, `--min-hold` de 2
+a 6 y la imagen al 100, 90, 80, 70 y 60 % en paralelo, afina el tamaño de
+a 2 %, muestra una tabla y codifica la elegida. Primero va la imagen: el
+audio solo mejora con lo que sobra.
 
 ```powershell
 .\work\a500vp-enc.exe --auto --in 'C:\Videos\mi_video.mp4' `
@@ -115,20 +117,24 @@ a 6 en paralelo, muestra una tabla y codifica la elegida.
 ```
 
 ```
-  colores  hold  img/s   error   (colores/sostenida/compresion)  tarde      audio        disco
-       32     4    6.2  14.52%  (3.06/11.02/0.44)     0, 0 VBL  fib4 22.3 dB  sobran 2 KB <- elegida
-       16     3    8.3  12.68%  (4.07/ 8.61/0.01)     1, 1 VBL  fib4 22.3 dB  sobran 0 KB
-        8     2   12.5  14.04%  (9.76/ 4.28/0.00)     0, 0 VBL  fib4 22.3 dB  sobran 41 KB
+  colores  hold  img/s  tamano   error   (colores/sostenida/compresion)  umbral  tarde      audio        disco
+       32     2   12.5     80%   7.71%  (0.03/ 5.89/1.79)  0.0707     7, 1 VBL  fib4 17.6 dB  sobran 0 KB granulado
+       32     2   12.5     70%   6.70%  (0.02/ 6.67/0.00)  0.0000     8, 1 VBL  pcm8 35.0 dB  sobran 2 KB <- elegida
+       32     3    8.3     80%  10.83%  (0.03/10.81/0.00)  0.0000     8, 1 VBL  pcm8 35.1 dB  sobran 16 KB
+
+auto       : afinando el tamano de 72% a 78% con 32 colores y --min-hold 2
+             72%: sirve, umbral 0.0000, 6.69%, sobran 10 KB
+             74%: no sirve, umbral 0.0272, 6.70%, sobran 0 KB
+auto       : elegida 32 colores con --min-hold 2 y --size 72
 ```
 
-Elige la de menos error entre las que entran sin subir el umbral de
-pérdida y llegan a tiempo, pero si una con más colores está a menos de 2
-puntos, prefiere esa. Las que tuvieron que subir el umbral salen marcadas
-`granulado`: su error parece chico pero los degradados se ven granulados.
-Si todas lo están, probá con la imagen más chica, más `--min-hold` o menos
-colores. El número no lo
-dice todo: mirá el reparto (cuánto error viene de los colores, cuánto de
-sostener la imagen y cuánto de la compresión) y la preview.
+Sirven las que entran sin subir el umbral de pérdida y llegan a tiempo. Las
+que tuvieron que subirlo salen marcadas `granulado`: su error parece chico,
+pero los degradados se ven granulados. Entre las que sirven y están a menos
+de 2 puntos de la de menos error, gana la de más colores y después la más
+grande. El error se mide sobre la imagen, sin el borde. El número no lo dice
+todo: mirá el reparto (cuánto error viene de los colores, cuánto de sostener
+la imagen y cuánto de la compresión) y la preview.
 
 Para elegir a mano:
 
@@ -189,6 +195,7 @@ pasabajos de la A500, así que en la máquina real suena un poco más apagado.
 | `--sharpen F` | realce de bordes (por defecto 1.2) | con 32 colores, `0` |
 | `--stability F` | histéresis del cuantizador (por defecto 0.07): ahorra bytes en el ruido, pero deja fantasmas de lo que se mueve | `0.02` si sin subir el umbral entra |
 | `--aspect MODO` | `letterbox`, `crop` o `stretch` | letterbox además ahorra bytes |
+| `--size P` | la imagen al P % del cuadro, centrada con borde negro (por defecto 100) | si se ve granulado o con fantasmas, achicarla rinde más que bajar colores; `--auto` la busca sola |
 | `--dither MODO` | `none`, `bayer2` o `bayer4` | ordenado y estable; nunca difusión de error |
 | `--predict auto` | usa el Blitter cuando conviene | dejalo así |
 

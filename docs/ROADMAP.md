@@ -24,6 +24,9 @@ que medirlas antes de darlas por buenas.**
 | H8, H10, H11, H13-H16 | pendientes |
 | H19-H23 (rama D) | **hechos** el 2026-09-13, ver abajo |
 | H24-H25 | nuevos, ver abajo |
+| Fantasmas y granulado | **resuelto** el 2026-09-15: aviso de umbral, cortes sin degradar, H26 y H27 |
+| H26 el disco que sobra va al audio | **hecho** el 2026-09-15 |
+| H27 `--size` y tamanos en `--auto` | **hecho** el 2026-09-15 |
 
 ---
 
@@ -334,6 +337,26 @@ En casi todos los discos el frame 0, que pinta la pantalla entera, llega 3
 o 4 VBL tarde. El reproductor puede dibujarlo **antes** de arrancar el audio
 y el reloj. Cambio chico en el reproductor y en la simulacion del encoder;
 el formato no cambia.
+
+---
+
+## Rama E: que no sobre nada, y primero la imagen  **[HECHA 2026-09-15]**
+
+Los fantasmas venian de la histeresis del cuantizador y el granulado del
+umbral subido; los dos son la forma que toma la falta de espacio. Lo que
+los saca es achicar la imagen. Detalle y mediciones en `DECISIONS.md`.
+
+### H26 — El disco que sobra lo usa el audio  **[HECHO]**
+
+Si el video entro sin subir el umbral, la frecuencia del audio sube hasta
+llenar el disco, con tope en 11 kHz (el pasabajos de la A500). Si algun dia
+se hace `--filtro off`, el tope se puede revisar.
+
+### H27 — `--size`, y `--auto` busca el tamano  **[HECHO]**
+
+La imagen reducida con borde negro, con todas las medidas sobre la imagen.
+`--auto` prueba cinco tamanos, elige por colores y despues por tamano, y
+afina de a 2 %. El audio solo recibe lo que sobra.
 
 ---
 
