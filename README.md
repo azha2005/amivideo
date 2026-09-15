@@ -327,7 +327,7 @@ build.ps1          compilar, generar discos, probar en WinUAE
 a500vp.uae         configuración de WinUAE: A500 fiel, sin ROM
 encoder\           encoder, decoder de referencia y escritor de ADF (C11)
 player\            bootblock y reproductor (ensamblador 68000, vasm)
-tools\             get-vasm.ps1, shot.ps1
+tools\             get-vasm.ps1, shot.ps1, max_duracion.ps1, lote.ps1
 docs\FORMAT.md     formato del bitstream (la única definición)
 docs\DECISIONS.md  decisiones de diseño y mediciones, con fecha y método
 docs\ROADMAP.md    lo que sigue
