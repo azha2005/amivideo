@@ -1045,19 +1045,23 @@ static size_t drop_pulldown(uint8_t **frames, size_t n, int y0, int y1,
 
 /* --- H21: busqueda de configuracion (--auto) -----------------------------
  * Lo que se hizo a mano con cada video: codificar la misma fuente con varias
- * combinaciones de colores y --min-hold, mirar error, frames tarde y si
- * entra, y elegir. El encoder se lanza a si mismo una vez por combinacion,
- * todas en paralelo (una por nucleo), cada una con su salida a un archivo
- * temporal, y junta los resultados.
+ * combinaciones de colores, --min-hold y tamano, mirar error, frames tarde y
+ * si entra, y elegir. El encoder se lanza a si mismo una vez por
+ * combinacion, todas en paralelo (una por nucleo), cada una con su salida a
+ * un archivo temporal, y junta los resultados.
  *
- * Criterio: entre las que entran sin subir el umbral de perdida y no pasan
- * de --max-late VBL de atraso, la de menos pixeles lejos de la fuente (las
- * que suben el umbral solo cuentan si ninguna entra sin subirlo); y si otra
- * con mas colores esta a
- * menos de 2 puntos de esa, la de mas colores: Az prefiere colores, y con
- * house eligio 32 colores a 1,3 puntos de la de menos error. */
+ * Criterio (Az: primero la imagen, despues el audio):
+ *  1. Sirven las que entran sin subir el umbral de perdida y no pasan de
+ *     --max-late VBL (las que suben el umbral solo si ninguna entra sin).
+ *  2. Entre esas, la de menos pixeles lejos de la fuente, medido sobre la
+ *     imagen; pero cualquiera a menos de 2 puntos de esa compite, y gana la
+ *     de mas colores, despues la mas grande, despues la de menos error. Con
+ *     house Az eligio 32 colores a 1,3 puntos de la de menos error.
+ *  3. Con la elegida se prueba la imagen de a 2 % mas grande hasta el tamano
+ *     siguiente de la lista, y se queda la mas grande que sigue sirviendo.
+ * El audio (H20, H26) solo se lleva lo que sobra de esa configuracion. */
 typedef struct {
-    int    planes, hold;
+    int    planes, hold, size;
     int    ok;             /* se pudo leer el resultado */
     int    fits;
     long   margin;         /* bytes que sobran (negativo si no entra) */
@@ -1071,7 +1075,7 @@ typedef struct {
 
 static const char *skip_opts[] = {
     "--auto", "--planes", "--min-hold", "--out", "--adf", "--preview",
-    "--budget", "--band-rows", NULL
+    "--budget", "--band-rows", "--size", "--auto-sizes", NULL
 };
 
 static int is_skipped(const char *a, int *takes_value)
@@ -1123,39 +1127,33 @@ static void auto_parse(const char *path, AutoRes *r)
             char *w = strstr(q, "SNR ");
             strcpy(r->audio, "pcm8");
             if (w) sscanf(w + 4, "%lf", &r->snr);
+        } else if ((q = strstr(line, "audio llena: ")) != NULL) {
+            char *w = strstr(q, "SNR ");
+            if (w) sscanf(w + 4, "%lf", &r->snr);
         }
     }
     fclose(f);
 }
 
-/* Devuelve la combinacion elegida en *planes y *hold, o 0 si ninguna sirve. */
-static int run_auto(int argc, char **argv, const char *out, long budget,
-                    int band_rows_set, int band_rows, int max_late,
-                    int *planes, int *hold)
+/* Codifica en paralelo las n configuraciones de res[] (planes, hold, size
+ * ya puestos) y lee sus resultados. tag distingue los temporales. */
+static void auto_batch(int argc, char **argv, const char *exe,
+                       const char *out, long budget, int band_rows_set,
+                       int band_rows, AutoRes *res, int n, const char *tag)
 {
-    static const int P[] = { 5, 4, 3 };
-    static const int H[] = { 2, 3, 4, 5, 6 };
-    enum { NP = 3, NH = 5, N = NP * NH };
-    AutoRes res[N];
-    char exe[1024];
-    int ncores = 4, i, k, running = 0, next = 0, best = -1, pick;
-    int allow_raised;
-    FILE *pipes[N];
-    char **cmds = calloc(N, sizeof *cmds);
+    int ncores = 4, i, k, running = 0, next = 0;
+    FILE **pipes = calloc((size_t)n, sizeof *pipes);
+    char **cmds = calloc((size_t)n, sizeof *cmds);
     const char *env = getenv("NUMBER_OF_PROCESSORS");
 
-    if (!cmds) die("sin memoria");
+    if (!cmds || !pipes) die("sin memoria");
     if (env && atoi(env) > 1) ncores = atoi(env) - 1;
-    a5_self_path(exe, sizeof exe, argv[0]);
-    memset(res, 0, sizeof res);
 
-    for (i = 0; i < N; i++) {
+    for (i = 0; i < n; i++) {
         size_t cap = 16384, len = 0;
         char *c = malloc(cap);
-        int br = band_rows_set ? band_rows : (P[i / NH] > 3 ? 8 : 16);
+        int br = band_rows_set ? band_rows : (res[i].planes > 3 ? 8 : 16);
         if (!c) die("sin memoria");
-        res[i].planes = P[i / NH];
-        res[i].hold = H[i % NH];
         len += (size_t)snprintf(c + len, cap - len, "\"%s\"", exe);
         for (k = 1; k < argc; k++) {
             int tv = 0;
@@ -1163,28 +1161,23 @@ static int run_auto(int argc, char **argv, const char *out, long budget,
             len += (size_t)snprintf(c + len, cap - len, " \"%s\"", argv[k]);
         }
         len += (size_t)snprintf(c + len, cap - len,
-                                " --planes %d --min-hold %d --band-rows %d"
-                                " --budget %ld --out \"%s.auto%d.a5v\""
-                                " > \"%s.auto%d.txt\" 2>&1",
-                                res[i].planes, res[i].hold, br, budget, out, i,
-                                out, i);
+                                " --planes %d --min-hold %d --size %d"
+                                " --band-rows %d --budget %ld"
+                                " --out \"%s.%s%d.a5v\""
+                                " > \"%s.%s%d.txt\" 2>&1",
+                                res[i].planes, res[i].hold, res[i].size, br,
+                                budget, out, tag, i, out, tag, i);
         if (len >= cap) die("linea de comando demasiado larga");
         cmds[i] = c;
     }
 
-    printf("auto       : %d configuraciones (%d, %d y %d colores x min-hold "
-           "2 a 6), %d a la vez\n", N, 1 << P[0], 1 << P[1], 1 << P[2],
-           ncores);
-    fflush(stdout);
-
     /* Se lanzan de a ncores; cerrar el pipe espera a que termine. */
-    while (next < N || running > 0) {
-        while (running < ncores && next < N) {
+    while (next < n || running > 0) {
+        while (running < ncores && next < n) {
             pipes[next] = a5_spawn(cmds[next]);
             if (!pipes[next]) die("no pude lanzar el encoder para --auto");
             next++; running++;
         }
-        /* el mas viejo que siga corriendo */
         for (i = 0; i < next; i++)
             if (pipes[i]) {
                 a5_pclose(pipes[i]);
@@ -1194,82 +1187,163 @@ static int run_auto(int argc, char **argv, const char *out, long budget,
             }
     }
 
-    for (i = 0; i < N; i++) {
+    for (i = 0; i < n; i++) {
         char path[1100];
-        snprintf(path, sizeof path, "%s.auto%d.txt", out, i);
+        snprintf(path, sizeof path, "%s.%s%d.txt", out, tag, i);
         auto_parse(path, &res[i]);
         remove(path);
-        snprintf(path, sizeof path, "%s.auto%d.a5v", out, i);
+        snprintf(path, sizeof path, "%s.%s%d.a5v", out, tag, i);
         remove(path);
-        snprintf(path, sizeof path, "%s.auto%d.a5v.crc", out, i);
+        snprintf(path, sizeof path, "%s.%s%d.a5v.crc", out, tag, i);
         remove(path);
         free(cmds[i]);
     }
     free(cmds);
+    free(pipes);
+}
+
+static int auto_usable(const AutoRes *r, int max_late, int allow_raised)
+{
+    return r->ok && r->fits && r->worst_late <= max_late &&
+           (!r->raised || allow_raised);
+}
+
+/* Devuelve la combinacion elegida en *planes, *hold y *size, o 0 si ninguna
+ * sirve. sizes[] son los tamanos a probar, de mayor a menor. */
+static int run_auto(int argc, char **argv, const char *out, long budget,
+                    int band_rows_set, int band_rows, int max_late,
+                    const int *sizes, int nsizes,
+                    int *planes, int *hold, int *size)
+{
+    static const int P[] = { 5, 4, 3 };
+    static const int H[] = { 2, 3, 4, 5, 6 };
+    enum { NP = 3, NH = 5 };
+    int N = NP * NH * nsizes;
+    AutoRes *res = calloc((size_t)N, sizeof *res);
+    char exe[1024];
+    int i, best = -1, pick, allow_raised;
+
+    if (!res) die("sin memoria");
+    a5_self_path(exe, sizeof exe, argv[0]);
+    for (i = 0; i < N; i++) {
+        res[i].size = sizes[i / (NP * NH)];
+        res[i].planes = P[(i / NH) % NP];
+        res[i].hold = H[i % NH];
+    }
+
+    printf("auto       : %d configuraciones (%d, %d y %d colores x min-hold "
+           "2 a 6 x %d tamanos)\n", N, 1 << P[0], 1 << P[1], 1 << P[2],
+           nsizes);
+    fflush(stdout);
+    auto_batch(argc, argv, exe, out, budget, band_rows_set, band_rows, res, N,
+               "auto");
 
     /* Las que tuvieron que subir el umbral quedan afuera mientras haya
      * alguna que no: su error contra la fuente esconde el granulado. */
     for (i = 0; i < N; i++)
-        if (res[i].ok && res[i].fits && res[i].worst_late <= max_late &&
-            !res[i].raised)
-            break;
+        if (auto_usable(&res[i], max_late, 0)) break;
     allow_raised = i == N;
     for (i = 0; i < N; i++) {
-        if (!res[i].ok || !res[i].fits || res[i].worst_late > max_late ||
-            (res[i].raised && !allow_raised))
-            continue;
+        if (!auto_usable(&res[i], max_late, allow_raised)) continue;
         if (best < 0 || res[i].bad < res[best].bad) best = i;
     }
     pick = best;
     if (best >= 0)
         for (i = 0; i < N; i++) {
-            if (!res[i].ok || !res[i].fits || res[i].worst_late > max_late ||
-                (res[i].raised && !allow_raised))
+            AutoRes *r = &res[i], *p;
+            if (!auto_usable(r, max_late, allow_raised) ||
+                r->bad > res[best].bad + 2.0)
                 continue;
-            if (res[i].bad <= res[best].bad + 2.0 &&
-                (res[i].planes > res[pick].planes ||
-                 (res[i].planes == res[pick].planes &&
-                  res[i].bad < res[pick].bad)))
+            p = &res[pick];
+            if (r->planes > p->planes ||
+                (r->planes == p->planes &&
+                 (r->size > p->size ||
+                  (r->size == p->size && r->bad < p->bad))))
                 pick = i;
         }
 
-    printf("\n  colores  hold  img/s   error   (colores/sostenida/"
+    printf("\n  colores  hold  img/s  tamano   error   (colores/sostenida/"
            "compresion)  umbral  tarde      audio        disco\n");
     for (i = 0; i < N; i++) {
         AutoRes *r = &res[i];
         if (!r->ok) {
-            printf("  %7d  %4d  fallo (ver la salida con esa configuracion)"
-                   "\n", 1 << r->planes, r->hold);
+            printf("  %7d  %4d  %5.1f  %5d%%  fallo (ver la salida con esa "
+                   "configuracion)\n", 1 << r->planes, r->hold,
+                   A5_VIDEO_FPS / r->hold, r->size);
             continue;
         }
-        printf("  %7d  %4d  %5.1f  %5.2f%%  (%4.2f/%5.2f/%4.2f)  %.4f  %4d, "
-               "%d VBL  %-4s %4.1f dB  %s %ld KB %s%s\n", 1 << r->planes,
-               r->hold, A5_VIDEO_FPS / r->hold, r->bad, r->color, r->motion,
-               r->comp, r->thr, r->late_frames, r->worst_late, r->audio,
-               r->snr, r->fits ? "sobran" : "FALTAN",
+        printf("  %7d  %4d  %5.1f  %5d%%  %5.2f%%  (%4.2f/%5.2f/%4.2f)  %.4f  "
+               "%4d, %d VBL  %-4s %4.1f dB  %s %ld KB %s%s\n", 1 << r->planes,
+               r->hold, A5_VIDEO_FPS / r->hold, r->size, r->bad, r->color,
+               r->motion, r->comp, r->thr, r->late_frames, r->worst_late,
+               r->audio, r->snr, r->fits ? "sobran" : "FALTAN",
                (r->margin < 0 ? -r->margin : r->margin) / 1024,
                r->raised ? "granulado " : "", i == pick ? "<- elegida" : "");
     }
     if (pick < 0) {
         printf("\nauto       : ninguna entra sin pasar de %d VBL de atraso\n",
                max_late);
+        free(res);
         return 0;
     }
-    printf("\nauto       : elegida %d colores con --min-hold %d (%.2f%%)",
-           1 << res[pick].planes, res[pick].hold, res[pick].bad);
+
+    *planes = res[pick].planes;
+    *hold = res[pick].hold;
+    *size = res[pick].size;
+
+    /* Paso 3: la imagen de a 2 % mas grande con la configuracion elegida,
+     * hasta el tamano siguiente de la lista (que no sirvio o no gano). */
+    if (!res[pick].raised) {
+        int upper = 102, n2 = 0, s;
+        AutoRes fine[16];
+        for (i = 0; i < nsizes; i++)
+            if (sizes[i] > res[pick].size && sizes[i] < upper)
+                upper = sizes[i];
+        memset(fine, 0, sizeof fine);
+        for (s = res[pick].size + 2; s < upper && s <= 100 && n2 < 16; s += 2) {
+            fine[n2].planes = res[pick].planes;
+            fine[n2].hold = res[pick].hold;
+            fine[n2].size = s;
+            n2++;
+        }
+        if (n2 > 0) {
+            printf("\nauto       : afinando el tamano de %d%% a %d%% con %d "
+                   "colores y --min-hold %d\n", fine[0].size,
+                   fine[n2 - 1].size, 1 << res[pick].planes, res[pick].hold);
+            fflush(stdout);
+            auto_batch(argc, argv, exe, out, budget, band_rows_set,
+                       band_rows, fine, n2, "fine");
+            for (i = 0; i < n2; i++) {
+                printf("             %d%%: %s, umbral %.4f, %.2f%%, %s %ld KB\n",
+                       fine[i].size,
+                       auto_usable(&fine[i], max_late, 0) ? "sirve"
+                                                          : "no sirve",
+                       fine[i].thr, fine[i].bad,
+                       fine[i].fits ? "sobran" : "faltan",
+                       (fine[i].margin < 0 ? -fine[i].margin
+                                           : fine[i].margin) / 1024);
+                if (auto_usable(&fine[i], max_late, 0) &&
+                    fine[i].size > *size)
+                    *size = fine[i].size;
+            }
+        }
+    }
+
+    printf("\nauto       : elegida %d colores con --min-hold %d y --size %d "
+           "(%.2f%% al %d%%)", 1 << *planes, *hold, *size, res[pick].bad,
+           res[pick].size);
     if (pick != best)
         printf(", a menos de 2 puntos de la de menos error (%d colores, "
-               "--min-hold %d, %.2f%%)", 1 << res[best].planes,
-               res[best].hold, res[best].bad);
+               "--min-hold %d, --size %d, %.2f%%)", 1 << res[best].planes,
+               res[best].hold, res[best].size, res[best].bad);
     if (allow_raised)
         printf("\n             AVISO: todas tuvieron que subir el umbral de "
-               "perdida; se va a ver granulado. Probar con la imagen mas "
-               "chica.");
+               "perdida; se va a ver granulado. Probar con --auto-sizes mas "
+               "chicos.");
     printf("\n             Ojo: el numero no lo dice todo (ver el reparto y "
            "mirar el preview).\n\n");
     fflush(stdout);
-    *planes = res[pick].planes;
-    *hold = res[pick].hold;
+    free(res);
     return 1;
 }
 
@@ -1278,8 +1352,11 @@ static void usage(void)
     printf(
 "uso: a500vp-enc --in <video> [opciones]\n"
 "\n"
-"  --auto                  prueba 32, 16 y 8 colores con --min-hold 2 a 6 en\n"
-"                          paralelo, muestra la tabla y codifica la elegida\n"
+"  --auto                  prueba 32, 16 y 8 colores con --min-hold 2 a 6 y\n"
+"                          varios tamanos en paralelo, afina el tamano de a 2 %%,\n"
+"                          muestra la tabla y codifica la elegida\n"
+"  --auto-sizes LISTA      tamanos que prueba --auto (100,90,80,70,60); con\n"
+"                          --size sin esta opcion, solo ese\n"
 "  --in PATH               video fuente (cualquier cosa que lea ffmpeg)\n"
 "  --out PATH              bitstream de salida (work\\video.a5v)\n"
 "  --preview PATH          mp4 opcional con la cuantizacion sin comprimir\n"
@@ -1390,6 +1467,8 @@ int main(int argc, char **argv)
     int    audio_fmt_auto = 1;
     int    source_auto = 1;         /* H19 */
     int    want_auto = 0;           /* H21 */
+    int    auto_sizes[16] = { 100, 90, 80, 70, 60 }, n_auto_sizes = 5;
+    int    size_set = 0, auto_sizes_set = 0;
     float *audio_x1 = NULL;         /* la entrada a ganancia 1, para H20 */
     const char *adf_path = NULL;
     const char *boot_path = "work\\boot.bin", *player_path = "work\\player.bin";
@@ -1519,6 +1598,21 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--size") && has) {
             size_pct = atoi(argv[++i]);
             if (size_pct < 30 || size_pct > 100) die("--size: de 30 a 100");
+            size_set = 1;
+        }
+        else if (!strcmp(a, "--auto-sizes") && has) {
+            char *list = argv[++i], *end;
+            n_auto_sizes = 0;
+            while (*list && n_auto_sizes < 16) {
+                long v = strtol(list, &end, 10);
+                if (end == list || v < 30 || v > 100)
+                    die("--auto-sizes: numeros de 30 a 100 separados por coma");
+                auto_sizes[n_auto_sizes++] = (int)v;
+                list = *end == ',' ? end + 1 : end;
+                if (*end && *end != ',') die("--auto-sizes: separados por coma");
+            }
+            if (!n_auto_sizes) die("--auto-sizes vacio");
+            auto_sizes_set = 1;
         }
         else if (!strcmp(a, "--aspect") && has) {
             const char *v = argv[++i];
@@ -1564,8 +1658,12 @@ int main(int argc, char **argv)
                             - (long)adf_sectors_for(playerlen) - reserve_tail)
                            * ADF_SECTOR_SIZE
                          : A5V_DEFAULT_BUDGET;
+        if (size_set && !auto_sizes_set) {
+            auto_sizes[0] = size_pct;
+            n_auto_sizes = 1;
+        }
         if (!run_auto(argc, argv, out, b, band_rows_set, band_rows, max_late,
-                      &planes, &min_hold))
+                      auto_sizes, n_auto_sizes, &planes, &min_hold, &size_pct))
             die("--auto no encontro una configuracion que sirva");
         if (!band_rows_set) { band_rows = planes > 3 ? 8 : 16; band_rows_set = 1; }
         ncolors = 1 << planes;
