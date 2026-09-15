@@ -2135,6 +2135,81 @@ del decoder de referencia.
 
 ---
 
+## 2026-09-15 — Pixeles fantasma, granulado y cortes degradados
+
+Az: "pixeles que se quedan del frame anterior que arruinan la escena", sobre
+todo en Caniggia, "pero aparece en todos". Tres causas distintas, medidas
+por separado.
+
+### 1. Los fantasmas vienen del cuantizador, no de la compresion
+
+**Metodo.** Se volco un mismo frame (Caniggia 32 colores mh4, frame 225) en
+cada etapa: fuente, ideal cuantizado y buffer visible. **El jugador ya esta
+a medio borrar en el ideal**, antes de comprimir. Con `--stability 0` el
+ideal sale limpio.
+
+La histeresis del cuantizador deja el indice del frame anterior si su color
+esta a menos de `--stability` (0,07) del mejor. El margen es contra la
+paleta y no mira si la fuente cambio: un objeto que se mueve sobre un fondo
+parecido deja su color pegado. Esos pixeles casi nunca pasan de 0,10 contra
+la fuente, asi que H22 los cuenta poco ("por colores").
+
+**Lo que cuesta sacarlos** (Caniggia 20 s, 32 colores mh4, bytes al umbral
+0,012; el presupuesto es 889 KB):
+
+| variante | bytes | resultado |
+|---|---|---|
+| histeresis 0,07 (lo de siempre) | 880 KB | fantasmas en el ideal |
+| sin histeresis | 1356 KB | ideal limpio |
+| histeresis 0,03 | 1029 KB | ideal limpio, algun resto tenue |
+| ancla: solo si la fuente cambio menos de 0,04 (promedio 3x3) | 1079 KB | quedan estelas de jugadores de 2 px |
+| ancla doble (promedio 0,025 + pixel 0,05) | 1206 KB | limpio |
+| refresco forzado de pixeles que quedan mal 2 deltas | — | peor: umbral 0,19, 9,8 % de compresion |
+| denoise 4-8 + histeresis 0,03 | 989-1004 KB | ahorra 2-4 % |
+
+Las anclas y el refresco no ganaron nada frente a bajar la histeresis y se
+descartaron (no quedaron en el codigo).
+
+**Conclusion.** El fantasma es la forma que toma la falta de espacio: con
+el ideal limpio el video no entra, el control de tasa sube el umbral y la
+compresion deja sus propios restos (arcos del circulo central durante un
+paneo). Lo que lo arregla es liberar bytes: imagen mas chica (probado con
+la fuente escalada y con borde negro), mas `--min-hold` o menos colores.
+Con histeresis 0,02-0,03 y la imagen al 60-80 % entraron limpios Caniggia
+(25 s mh2 al 60 %), el tren, btf, bttf3, House (27,35 s mh3 al 75 %) y
+Fringe. El valor por defecto de `--stability` sigue en 0,07 hasta medirlo
+en todos los clips: en clips quietos (Fringe) casi no deja fantasmas.
+
+### 2. El umbral subido se ve granulado y H22 no lo ve
+
+Fringe al 90 %, 32 colores mh2: "de esos" marcaba **0,44 % por
+compresion** y Az lo vio "mucho mas pixelado". El control de tasa habia
+subido el umbral a **0,0645**: todos los errores que deja quedan bajo 0,10,
+el limite de H22. El error medio contra el ideal lo delata: 0,0148 contra
+0,0028 del mismo clip al 80 % (umbral normal).
+
+Revision de los 24 discos del dia (recodificados, identicos byte a byte):
+6 habian subido el umbral (0,030 a 0,068) con 0,1-1 % "por compresion".
+
+**Decision.** El reporte muestra siempre `perdida : umbral` y avisa cuando
+se subio; `--auto` lo muestra en la tabla y solo elige una configuracion
+que lo subio si ninguna entra sin subirlo. El criterio de "se ve limpio"
+es el umbral, no el porcentaje.
+
+### 3. Los cortes de escena no se degradan
+
+DeLorean con histeresis 0,02 y fib4 11 kHz: fib4 le cuesta mas CPU al
+reproductor que pcm8, el corte del frame 199 no llegaba a tiempo y se
+degrado (umbral x64): **dos frames de mosaico** con media escena anterior.
+
+**Decision.** Un corte acepta `--max-late` + 4 VBL antes de degradarse
+(el tope evita que un corte carisimo atrase todo). Ese atraso se informa
+en una linea aparte (`cortes :`) para que `--auto` no descarte la
+configuracion por eso. Medido: el mismo corte llega 3 VBL tarde y entero;
+House 75 % mh3 sale identico byte a byte.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.

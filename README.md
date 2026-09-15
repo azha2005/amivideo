@@ -121,8 +121,12 @@ a 6 en paralelo, muestra una tabla y codifica la elegida.
         8     2   12.5  14.04%  (9.76/ 4.28/0.00)     0, 0 VBL  fib4 22.3 dB  sobran 41 KB
 ```
 
-Elige la de menos error entre las que entran y llegan a tiempo, pero si
-una con más colores está a menos de 2 puntos, prefiere esa. El número no lo
+Elige la de menos error entre las que entran sin subir el umbral de
+pérdida y llegan a tiempo, pero si una con más colores está a menos de 2
+puntos, prefiere esa. Las que tuvieron que subir el umbral salen marcadas
+`granulado`: su error parece chico pero los degradados se ven granulados.
+Si todas lo están, probá con la imagen más chica, más `--min-hold` o menos
+colores. El número no lo
 dice todo: mirá el reparto (cuánto error viene de los colores, cuánto de
 sostener la imagen y cuánto de la compresión) y la preview.
 
@@ -183,6 +187,7 @@ pasabajos de la A500, así que en la máquina real suena un poco más apagado.
 | `--band-rows N` | paleta por franjas de N filas lógicas | con 4 o 5 planos usá `8` |
 | `--min-hold N` | una imagen nueva como mucho cada N×40 ms | 2 = 12,5/s, 3 = 8,3/s, 4 = 6,2/s. Subirlo alarga el video |
 | `--sharpen F` | realce de bordes (por defecto 1.2) | con 32 colores, `0` |
+| `--stability F` | histéresis del cuantizador (por defecto 0.07): ahorra bytes en el ruido, pero deja fantasmas de lo que se mueve | `0.02` si sin subir el umbral entra |
 | `--aspect MODO` | `letterbox`, `crop` o `stretch` | letterbox además ahorra bytes |
 | `--dither MODO` | `none`, `bayer2` o `bayer4` | ordenado y estable; nunca difusión de error |
 | `--predict auto` | usa el Blitter cuando conviene | dejalo así |
@@ -192,9 +197,9 @@ pasabajos de la A500, así que en la máquina real suena un poco más apagado.
 | opción | qué hace |
 |---|---|
 | `--start S`, `--duration S` | recorte de la fuente, en segundos |
-| `--quality N` | pérdida permitida; 0 = sin pérdida. Si no entra, el control de tasa la sube solo |
+| `--quality N` | pérdida permitida; 0 = sin pérdida. Si no entra, el control de tasa la sube solo y avisa (`perdida : umbral`): se ve granulado |
 | `--budget BYTES` | tope de bytes; con `--adf` es lo que queda en el disco |
-| `--max-late N` | VBL de atraso tolerados antes de bajarle la calidad a un frame (por defecto 2) |
+| `--max-late N` | VBL de atraso tolerados antes de bajarle la calidad a un frame (por defecto 2; los cortes de escena aguantan 4 más) |
 | `--rate pal` | frames 1:1, todo 4 % más rápido, como en la TV PAL |
 
 ### Audio
