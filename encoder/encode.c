@@ -321,7 +321,7 @@ typedef struct {
     int    late_frames;     /* frames que el reproductor va a mostrar tarde */
     int    max_late;        /* mayor atraso previsto, en VBL */
     int    max_late_frame;
-    double err_sum;         /* error perceptual medio contra el frame ideal */
+    double err_sum;        /* error perceptual medio contra el frame ideal */
     long   bad_pixels;      /* pixeles activos con error visible, sumados */
     uint32_t *crc;          /* uno por frame, del buffer visible */
     double src_err;         /* error de lo que se ve contra la fuente, sumado */
@@ -1030,8 +1030,10 @@ static size_t drop_pulldown(uint8_t **frames, size_t n, int y0, int y1,
  * todas en paralelo (una por nucleo), cada una con su salida a un archivo
  * temporal, y junta los resultados.
  *
- * Criterio: entre las que entran y no pasan de --max-late VBL de atraso, la
- * de menos pixeles lejos de la fuente; y si otra con mas colores esta a
+ * Criterio: entre las que entran sin subir el umbral de perdida y no pasan
+ * de --max-late VBL de atraso, la de menos pixeles lejos de la fuente (las
+ * que suben el umbral solo cuentan si ninguna entra sin subirlo); y si otra
+ * con mas colores esta a
  * menos de 2 puntos de esa, la de mas colores: Az prefiere colores, y con
  * house eligio 32 colores a 1,3 puntos de la de menos error. */
 typedef struct {
@@ -1043,6 +1045,8 @@ typedef struct {
     int    late_frames, worst_late;
     double snr;
     char   audio[16];
+    double thr;            /* umbral de perdida con el que entro */
+    int    raised;         /* hubo que subirlo: se ve granulado */
 } AutoRes;
 
 static const char *skip_opts[] = {
@@ -1091,6 +1095,10 @@ static void auto_parse(const char *path, AutoRes *r)
             strcpy(r->audio, "fib4");
         } else if (!strncmp(line, "audio      : pcm8", 17)) {
             strcpy(r->audio, "pcm8");
+        } else if ((q = strstr(line, "perdida    : umbral")) != NULL) {
+            sscanf(q + 19, "%lf", &r->thr);
+        } else if (strstr(line, "AVISO: para entrar se subio el umbral")) {
+            r->raised = 1;
         } else if ((q = strstr(line, "audio auto : ")) != NULL) {
             char *w = strstr(q, "SNR ");
             strcpy(r->audio, "pcm8");
@@ -1111,6 +1119,7 @@ static int run_auto(int argc, char **argv, const char *out, long budget,
     AutoRes res[N];
     char exe[1024];
     int ncores = 4, i, k, running = 0, next = 0, best = -1, pick;
+    int allow_raised;
     FILE *pipes[N];
     char **cmds = calloc(N, sizeof *cmds);
     const char *env = getenv("NUMBER_OF_PROCESSORS");
@@ -1178,15 +1187,24 @@ static int run_auto(int argc, char **argv, const char *out, long budget,
     }
     free(cmds);
 
+    /* Las que tuvieron que subir el umbral quedan afuera mientras haya
+     * alguna que no: su error contra la fuente esconde el granulado. */
+    for (i = 0; i < N; i++)
+        if (res[i].ok && res[i].fits && res[i].worst_late <= max_late &&
+            !res[i].raised)
+            break;
+    allow_raised = i == N;
     for (i = 0; i < N; i++) {
-        if (!res[i].ok || !res[i].fits || res[i].worst_late > max_late)
+        if (!res[i].ok || !res[i].fits || res[i].worst_late > max_late ||
+            (res[i].raised && !allow_raised))
             continue;
         if (best < 0 || res[i].bad < res[best].bad) best = i;
     }
     pick = best;
     if (best >= 0)
         for (i = 0; i < N; i++) {
-            if (!res[i].ok || !res[i].fits || res[i].worst_late > max_late)
+            if (!res[i].ok || !res[i].fits || res[i].worst_late > max_late ||
+                (res[i].raised && !allow_raised))
                 continue;
             if (res[i].bad <= res[best].bad + 2.0 &&
                 (res[i].planes > res[pick].planes ||
@@ -1196,7 +1214,7 @@ static int run_auto(int argc, char **argv, const char *out, long budget,
         }
 
     printf("\n  colores  hold  img/s   error   (colores/sostenida/"
-           "compresion)  tarde      audio        disco\n");
+           "compresion)  umbral  tarde      audio        disco\n");
     for (i = 0; i < N; i++) {
         AutoRes *r = &res[i];
         if (!r->ok) {
@@ -1204,13 +1222,13 @@ static int run_auto(int argc, char **argv, const char *out, long budget,
                    "\n", 1 << r->planes, r->hold);
             continue;
         }
-        printf("  %7d  %4d  %5.1f  %5.2f%%  (%4.2f/%5.2f/%4.2f)  %4d, "
-               "%d VBL  %-4s %4.1f dB  %s %ld KB %s\n", 1 << r->planes,
+        printf("  %7d  %4d  %5.1f  %5.2f%%  (%4.2f/%5.2f/%4.2f)  %.4f  %4d, "
+               "%d VBL  %-4s %4.1f dB  %s %ld KB %s%s\n", 1 << r->planes,
                r->hold, A5_VIDEO_FPS / r->hold, r->bad, r->color, r->motion,
-               r->comp, r->late_frames, r->worst_late, r->audio, r->snr,
-               r->fits ? "sobran" : "FALTAN",
+               r->comp, r->thr, r->late_frames, r->worst_late, r->audio,
+               r->snr, r->fits ? "sobran" : "FALTAN",
                (r->margin < 0 ? -r->margin : r->margin) / 1024,
-               i == pick ? "<- elegida" : "");
+               r->raised ? "granulado " : "", i == pick ? "<- elegida" : "");
     }
     if (pick < 0) {
         printf("\nauto       : ninguna entra sin pasar de %d VBL de atraso\n",
@@ -1223,6 +1241,10 @@ static int run_auto(int argc, char **argv, const char *out, long budget,
         printf(", a menos de 2 puntos de la de menos error (%d colores, "
                "--min-hold %d, %.2f%%)", 1 << res[best].planes,
                res[best].hold, res[best].bad);
+    if (allow_raised)
+        printf("\n             AVISO: todas tuvieron que subir el umbral de "
+               "perdida; se va a ver granulado. Probar con la imagen mas "
+               "chica.");
     printf("\n             Ojo: el numero no lo dice todo (ver el reparto y "
            "mirar el preview).\n\n");
     fflush(stdout);
@@ -2080,6 +2102,17 @@ int main(int argc, char **argv)
             printf("             AVISO: ningun umbral entro en el "
                    "presupuesto\n");
 
+        /* Subir el umbral para entrar deja sin actualizar errores chicos,
+         * todos por debajo de A5_VISIBLE_ERR: la linea "de esos" no los
+         * cuenta, pero en un degradado se ven como granulado (fringe al 90 %,
+         * umbral 0,0645, marcaba 0,44 % de compresion; ver DECISIONS.md). */
+        printf("perdida    : umbral %.4f (pedido con --quality: %.4f)\n", qthr,
+               quality * 0.0015);
+        if (qthr > quality * 0.0015 + 1e-9)
+            printf("  AVISO: para entrar se subio el umbral de perdida: los "
+                   "degradados se van a ver granulados (achicar la imagen, "
+                   "subir --min-hold o bajar colores)\n");
+
         /* H20: si el video ya entra sin perdida, el disco que sobra no le
          * sirve de nada. Con --audio-format auto se lo lleva el audio: pcm8
          * ocupa el doble que fib4 pero no satura (delorean: de 8 a 35 dB
@@ -2226,8 +2259,7 @@ int main(int argc, char **argv)
         printf("tiempo real: %d frames se van a ver tarde, el peor por %d VBL "
                "(frame %d); %d degradados para no pasar de %d VBL\n",
                st.late_frames, st.max_late, st.max_late_frame, st.degraded,
-               max_late);
-        if (st.over_budget)
+               max_late);        if (st.over_budget)
             printf("  AVISO: %d frames pasan el tope fijo de %.0f ms\n",
                    st.over_budget, frame_ms);
         printf("prediccion : %d de %d deltas copian el buffer visible antes "
