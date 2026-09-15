@@ -321,6 +321,8 @@ typedef struct {
     int    late_frames;     /* frames que el reproductor va a mostrar tarde */
     int    max_late;        /* mayor atraso previsto, en VBL */
     int    max_late_frame;
+    int    cut_late;        /* cortes de escena que pasan de max_late */
+    int    cut_max_late;
     double err_sum;        /* error perceptual medio contra el frame ideal */
     long   bad_pixels;      /* pixeles activos con error visible, sumados */
     uint32_t *crc;          /* uno por frame, del buffer visible */
@@ -375,6 +377,10 @@ static double idx_error(const uint8_t *a, const uint8_t *b,
  * salpicado: 0,047 de media puede ser un 20% de pixeles con 0,2 de error.
  * 0,1 en Oklab es un cambio de color que se nota sin buscarlo. */
 #define A5_VISIBLE_ERR  0.1
+
+/* VBL de atraso extra que aguanta un corte de escena antes de degradarse:
+ * el tope evita que un corte carisimo atrase todo lo que sigue. */
+#define A5_CUT_EXTRA_LATE  4
 
 static long idx_bad(const uint8_t *a, const uint8_t *b, const A5Palette *pals,
                     int y0, int y1)
@@ -782,15 +788,21 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         best = &ca;
         {
             /* El frame 0 se dibuja antes de que arranque el reloj: sin
-             * apuro, y sin llenados de audio en el medio. */
+             * apuro, y sin llenados de audio en el medio.
+             *
+             * Un corte de escena degradado deja media escena anterior en
+             * pantalla (delorean, frames 199-200: mosaico de dos escenas),
+             * que se ve mucho peor que el corte 60 ms tarde. Los cortes
+             * aceptan A5_CUT_EXTRA_LATE VBL mas antes de degradar. */
             double tf = n == 0 ? -1e15 : t_free;
+            int lim = newscene ? max_late + A5_CUT_EXTRA_LATE : max_late;
             if (g_predict != A5_PRED_VISIBLE)
                 try_delta(&ca, hid, ideal, pal, planes, y0, y1, thr, 0,
-                          cyc_limit, max_late, tf, due, P, fillp, fillc);
+                          cyc_limit, lim, tf, due, P, fillp, fillc);
             if (g_predict != A5_PRED_HIDDEN) {
                 predict_copy(pred, hid, vis, y0, y1);
                 try_delta(&cb, pred, ideal, pal, planes, y0, y1, thr,
-                          copy_cyc, cyc_limit, max_late, tf, due, P, fillp,
+                          copy_cyc, cyc_limit, lim, tf, due, P, fillp,
                           fillc);
                 if (g_predict == A5_PRED_VISIBLE || cand_better(&cb, &ca))
                     best = &cb;
@@ -805,7 +817,11 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
             st->maxcycles = best->cycles;
             st->maxcycles_frame = (int)n;
         }
-        if (late > 0) {
+        if (newscene && late > max_late) {
+            /* aparte, para que --auto no descarte por esto una config */
+            st->cut_late++;
+            if (late > st->cut_max_late) st->cut_max_late = late;
+        } else if (late > 0) {
             st->late_frames++;
             if (late > st->max_late) {
                 st->max_late = late;
@@ -2259,7 +2275,12 @@ int main(int argc, char **argv)
         printf("tiempo real: %d frames se van a ver tarde, el peor por %d VBL "
                "(frame %d); %d degradados para no pasar de %d VBL\n",
                st.late_frames, st.max_late, st.max_late_frame, st.degraded,
-               max_late);        if (st.over_budget)
+               max_late);
+        if (st.cut_late)
+            printf("  cortes   : %d cortes de escena pasan de %d VBL (el peor "
+                   "por %d) en vez de degradarse\n", st.cut_late, max_late,
+                   st.cut_max_late);
+        if (st.over_budget)
             printf("  AVISO: %d frames pasan el tope fijo de %.0f ms\n",
                    st.over_budget, frame_ms);
         printf("prediccion : %d de %d deltas copian el buffer visible antes "
