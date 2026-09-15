@@ -957,7 +957,7 @@ static int cmp_double(const void *pa, const void *pb)
 }
 
 static size_t drop_pulldown(uint8_t **frames, size_t n, int y0, int y1,
-                            double fps, SourceFix *fx)
+                            double area_scale, double fps, SourceFix *fx)
 {
     size_t row0 = (size_t)y0 * A5_W * 3, len = (size_t)(y1 - y0) * A5_W * 3;
     double *d, *sorted, med, thr;
@@ -978,7 +978,7 @@ static size_t drop_pulldown(uint8_t **frames, size_t n, int y0, int y1,
         long sum = 0;
         const uint8_t *pa = frames[i - 1] + row0, *pb = frames[i] + row0;
         for (k = 0; k < len; k++) sum += abs((int)pa[k] - (int)pb[k]);
-        d[i] = (double)sum / len;
+        d[i] = (double)sum / len * area_scale;
     }
     memcpy(sorted, d + 1, (n - 1) * sizeof *d);
     qsort(sorted, n - 1, sizeof *sorted, cmp_double);
@@ -1330,6 +1330,9 @@ static void usage(void)
 "                          intervalos regulares (telecine, 25 subido a 30,\n"
 "                          24 pasado a 25) y los saca antes de codificar\n"
 "  --aspect MODO           letterbox | crop | stretch (letterbox)\n"
+"  --size P                la imagen al P %% del cuadro, centrada con borde\n"
+"                          negro (100); menos area = mas colores, fluidez o\n"
+"                          duracion por el mismo disco\n"
 "  --rate MODO             native | pal (native)\n"
 "                            native: repite frames para respetar la velocidad\n"
 "                                    original; el audio no se toca\n"
@@ -1404,6 +1407,8 @@ int main(int argc, char **argv)
     SourceFix srcfix;
     char vfilter[512];
     int cols, rows, x0, y0, y1;
+    int size_pct = 100;             /* --size */
+    double area_scale = 1.0;        /* ancho del cuadro / ancho de la imagen */
     int ncolors;
 
     uint8_t **frames = NULL, **srcframes = NULL;
@@ -1511,6 +1516,10 @@ int main(int argc, char **argv)
             else if (!strcmp(v, "auto"))    g_predict = A5_PRED_AUTO;
             else die("--predict: auto, hidden o visible");
         }
+        else if (!strcmp(a, "--size") && has) {
+            size_pct = atoi(argv[++i]);
+            if (size_pct < 30 || size_pct > 100) die("--size: de 30 a 100");
+        }
         else if (!strcmp(a, "--aspect") && has) {
             const char *v = argv[++i];
             if (!strcmp(v, "letterbox"))    aspect = ASPECT_LETTERBOX;
@@ -1600,8 +1609,19 @@ int main(int argc, char **argv)
                 cols = even((int)(A5_H * dar / A5_PAR + 0.5));
             }
         }
+        /* --size: la imagen mas chica, centrada, con borde negro. Las filas
+         * del borde quedan fuera del area activa (no cuestan nada y las
+         * franjas de paleta se reparten solo sobre la imagen); las columnas
+         * no, y por eso las medidas se normalizan por area_scale. */
+        if (size_pct < 100) {
+            if (aspect == ASPECT_CROP) die("--size no va con --aspect crop");
+            cols = even((int)(cols * size_pct / 100.0 + 0.5));
+            rows = even((int)(rows * size_pct / 100.0 + 0.5));
+        }
         x0 = (A5_W - cols) / 2;
         y0 = (A5_H - rows) / 2;
+        if (aspect != ASPECT_CROP && cols < A5_W)
+            area_scale = (double)A5_W / cols;
     }
 
     {
@@ -1641,8 +1661,9 @@ int main(int argc, char **argv)
                ncolors, cols, rows, A5_W, A5_H);
     else
         printf("geometria  : %d colores, area activa %dx%d centrada en %dx%d "
-               "(%d filas de barra)\n",
-               ncolors, cols, rows, A5_W, A5_H, A5_H - rows);
+               "(%d filas de barra)%s\n",
+               ncolors, cols, rows, A5_W, A5_H, A5_H - rows,
+               size_pct < 100 ? ", reducida con --size" : "");
     printf("             filtro ffmpeg: %s\n", vfilter);
 
     /* --- franjas de paleta ------------------------------------------ */
@@ -1697,7 +1718,8 @@ int main(int argc, char **argv)
     /* --- H19: frames repetidos de la conversion de la fuente --------- */
     if (source_auto) {
         size_t before = nframes;
-        nframes = drop_pulldown(frames, nframes, y0, y1, src.fps, &srcfix);
+        nframes = drop_pulldown(frames, nframes, y0, y1, area_scale, src.fps,
+                                &srcfix);
         if (srcfix.removed) {
             double nf = src.fps * (double)nframes / before;
             printf("fuente     : 1 frame repetido cada %.0f (%.0f%% de los "
@@ -1850,7 +1872,7 @@ int main(int argc, char **argv)
             } else {
                 for (k = 0; k < npix; k++)
                     sum += sqrt((double)a5_oklab_dist2(cur[k], prev[k]));
-                delta[n] = sum / npix;
+                delta[n] = sum / npix * area_scale;   /* media sobre la imagen */
             }
             memcpy(prev, cur, npix * sizeof *cur);
         }
@@ -1880,7 +1902,8 @@ int main(int argc, char **argv)
         long nswap = 0, nswapb = 0;     /* colores cambiados por franja */
         /* Con franjas el negro se reserva siempre: el color 0 es tambien el
          * del borde, y el Copper no lo cambia por franja (FORMAT.md). */
-        int reserve_black = ((aspect != ASPECT_CROP) && (y1 - y0 < A5_H))
+        int reserve_black = ((aspect != ASPECT_CROP) &&
+                             (y1 - y0 < A5_H || cols < A5_W))
                           || g_nbands > 1;
 
         for (s = 0; s < nscenes; s++) {
@@ -2366,19 +2389,20 @@ int main(int argc, char **argv)
                st.ndelta ? 100.0 * st.ncopy / st.ndelta : 0.0,
                a5_cyc_blit(planes) * (double)planes * (y1 - y0)
                    * 1000.0 / A5_CPU_HZ);
+        /* Todo sobre la imagen: con --size las columnas del borde son negro
+         * exacto en la fuente y en el disco, y diluian los porcentajes. */
+        double img_px = (double)nframes * (y1 - y0) * A5_W / area_scale;
         printf("error final: %.4f (contra el frame cuantizado ideal)\n",
-               st.err_sum / nframes);
+               st.err_sum / nframes * area_scale);
         printf("salpicado  : %.2f%% de los pixeles activos con error "
                "visible (> %.2f)\n",
-               100.0 * st.bad_pixels / ((double)nframes * (y1 - y0) * A5_W),
-               A5_VISIBLE_ERR);
+               100.0 * st.bad_pixels / img_px, A5_VISIBLE_ERR);
         printf("vs. fuente : error %.4f; %.2f%% de los pixeles activos a mas "
                "de %.2f del original\n",
-               st.src_err / ((double)nframes * (y1 - y0) * A5_W),
-               100.0 * st.src_bad / ((double)nframes * (y1 - y0) * A5_W),
+               st.src_err / img_px, 100.0 * st.src_bad / img_px,
                A5_VISIBLE_ERR);
         {
-            double np = (double)nframes * (y1 - y0) * A5_W / 100.0;
+            double np = img_px / 100.0;
             printf("  de esos  : %.2f%% por colores, %.2f%% por imagen "
                    "sostenida, %.2f%% por compresion\n", st.bad_color / np,
                    st.bad_motion / np, st.bad_comp / np);
