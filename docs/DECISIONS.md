@@ -2210,6 +2210,39 @@ House 75 % mh3 sale identico byte a byte.
 
 ---
 
+## 2026-09-15 — H26: el disco que sobra se lo lleva el audio
+
+Az: "la idea es que nunca sobre nada en el disco". Con la imagen reducida y
+el umbral normal, los discos quedaban con 30-100 KB sin usar: H20 pasa el
+audio a pcm8 solo si entra a la misma frecuencia, y lo que sobra despues se
+perdia.
+
+**Decision.** Despues de H20, si el video entro sin subir el umbral y
+sobra mas de 1 KB, se sube la frecuencia del audio sin cambiar el formato
+hasta llenar el disco. Se rearma el stream y se acepta solo si entra, no
+suma frames degradados y el error contra el ideal no sube mas de 0,1 %
+(mas muestras son mas llenados de audio, que le quitan CPU al delta). Si
+se dio `--audio-rate` o `--audio-period`, no se toca.
+
+**Tope: 11025 Hz.** El pasabajos fijo de la A500 corta cerca de 5 kHz;
+muestrear a mas de 11 kHz no agrega nada que se oiga en el hardware real.
+Con el tope puede seguir sobrando disco: eso le toca a la imagen (`--size`,
+pendiente).
+
+**Medido** (con `--adf`, presupuesto 888832):
+
+| clip | antes | despues |
+|---|---|---|
+| See30 68 % mh2 | pcm8 8 kHz, sobraban 55 KB | pcm8 11015 Hz, SNR 35,1 dB, sobran 4 KB |
+| See30 72 % mh2 | fib4 8 kHz, sobraban 18 KB | fib4 9880 Hz, sobran 2 KB |
+| House 80 % mh4 | fib4 8 kHz, sobraban 90 KB | fib4 11015 Hz (tope), sobran 48 KB |
+| Fringe 90 % mh2 (umbral subido) | sin cambio | sin cambio |
+| DeLorean 85 % con `--audio-rate 11000` | sin cambio | sin cambio |
+
+Los cinco pasan la verificacion del decoder de referencia.
+
+---
+
 ## 2026-09-10 — Pendiente de medir
 
 - ~~Velocidad de lectura de trackdisk.~~ Medida en el Hito 4: 17,9 KB/s.
