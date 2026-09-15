@@ -202,13 +202,15 @@ y la verificación.
 |---|---|---|
 | `-Planes` | 3 = 8 colores, 4 = 16, 5 = 32 | 5 |
 | `-Hold` | `--min-hold`: 2 = 12,5 img/s, 3 = 8,3, 4 = 6,2 | 2 |
-| `-Size` | tamaño de la imagen, 30 a 100 | 60 |
+| `-Size` | tamaño de la imagen, 30 a 100; si no se da, es el mínimo y crece si el clip entra entero | 60 |
 | `-Start` | desde qué segundo | 0 |
 | `-Extra` | otras opciones del encoder | — |
 
 Prueba varias duraciones en paralelo y se queda con la más larga que entra
-sin subir el umbral de pérdida, con medio segundo de precisión. Un clip de
-30 s tarda uno o dos minutos.
+sin subir el umbral de pérdida, con medio segundo de precisión. Si el clip
+entra entero y no le diste `-Size`, sigue con el tamaño: agranda la imagen
+de a 2 % hasta donde sigue entrando limpia (con `-Size` fijo, lo respeta).
+Un clip de 30 s tarda uno o dos minutos.
 
 **Una lista de clips en tanda** con `--auto`, uno detrás de otro. La lista
 va en `work\clips.psd1` (fuera de git):
