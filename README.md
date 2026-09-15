@@ -181,6 +181,62 @@ pasabajos de la A500, así que en la máquina real suena un poco más apagado.
 # -> work\a500vp.adf y work\preview.mp4
 ```
 
+### Scripts de utilidad
+
+Están en `tools\`. Usan las mismas opciones que dejan los discos limpios
+(`--sharpen 0 --stability 0.02 --max-late 4`), generan el `.adf`, la preview
+y la verificación.
+
+**La duración más larga que entra**, con colores, fluidez y tamaño fijos:
+
+```powershell
+# 32 colores, 12,5 img/s, imagen al 60 % (lo que usa si no le decís nada)
+.\tools\max_duracion.ps1 -In 'C:\Videos\clip.mp4' -Name clip
+
+# desde el segundo 10, 16 colores, 8,3 img/s, imagen al 80 %, canal izquierdo
+.\tools\max_duracion.ps1 -In 'C:\Videos\clip.mp4' -Name clip -Start 10 `
+  -Planes 4 -Hold 3 -Size 80 -Extra '--audio-channel','left'
+```
+
+| parámetro | qué fija | por defecto |
+|---|---|---|
+| `-Planes` | 3 = 8 colores, 4 = 16, 5 = 32 | 5 |
+| `-Hold` | `--min-hold`: 2 = 12,5 img/s, 3 = 8,3, 4 = 6,2 | 2 |
+| `-Size` | tamaño de la imagen, 30 a 100 | 60 |
+| `-Start` | desde qué segundo | 0 |
+| `-Extra` | otras opciones del encoder | — |
+
+Prueba varias duraciones en paralelo y se queda con la más larga que entra
+sin subir el umbral de pérdida, con medio segundo de precisión. Un clip de
+30 s tarda uno o dos minutos.
+
+**Una lista de clips en tanda** con `--auto`, uno detrás de otro. La lista
+va en `work\clips.psd1` (fuera de git):
+
+```powershell
+@{ Clips = @(
+  @{ n = 'caniggia'; in = 'C:\Videos\caniggia.mp4'; x = @('--start', '10', '--duration', '25') }
+  @{ n = 'house';    in = 'C:\Videos\house.mp4';    x = @('--duration', '27.35', '--audio-channel', 'left') }
+  @{ n = 'fringe';   in = 'C:\Videos\fringe.mp4' }
+) }
+```
+
+```powershell
+.\tools\lote.ps1                        # todos
+.\tools\lote.ps1 -Solo caniggia,house   # algunos
+```
+
+Deja `work\<n>_auto.adf`, `work\<n>_auto_preview.mp4`, el log de cada uno en
+`work\logs\` y un resumen de todos en `work\lote_resumen.txt`.
+
+> **Si PowerShell dice "running scripts is disabled on this system":**
+> Windows bloquea los scripts por defecto. Para habilitarlos solo para tu
+> usuario, una vez y sin administrador:
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+> Para no cambiar nada, corrélos así:
+> `powershell -ExecutionPolicy Bypass -File .\tools\max_duracion.ps1 -In ... -Name ...`
+> Lo mismo vale para `build.ps1`.
+
 ---
 
 ## Opciones
