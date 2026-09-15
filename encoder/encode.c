@@ -378,6 +378,10 @@ static double idx_error(const uint8_t *a, const uint8_t *b,
  * 0,1 en Oklab es un cambio de color que se nota sin buscarlo. */
 #define A5_VISIBLE_ERR  0.1
 
+/* H26: hasta donde sube el audio para llenar el disco. El pasabajos fijo de
+ * la A500 corta cerca de 5 kHz: mas de 11 kHz de muestreo no se oye. */
+#define A5_AUDIO_FILL_MAX_HZ  11025.0
+
 /* VBL de atraso extra que aguanta un corte de escena antes de degradarse:
  * el tope evita que un corte carisimo atrase todo lo que sigue. */
 #define A5_CUT_EXTRA_LATE  4
@@ -1375,7 +1379,8 @@ int main(int argc, char **argv)
     long   cyc_limit;
     long   budget = -1;             /* -1 = lo que queda en el disco */
     int    audio_period = 443;
-    int    audio_format = -1;       /* -1 = auto: fib4, o pcm8 si sobra disco */
+    int    audio_rate_set = 0;      /* se dio --audio-rate o --audio-period */
+    int    audio_format = -1;      /* -1 = auto: fib4, o pcm8 si sobra disco */
     double audio_gain = -1;         /* -1 = auto (H20) */
     const char *audio_filter = NULL;   /* NULL = mezcla L+R (-ac 1) */
     int    audio_chan_auto = 1;
@@ -1450,11 +1455,15 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(a, "--min-hold") && has)      min_hold = atoi(argv[++i]);
         else if (!strcmp(a, "--max-late") && has)      max_late = atoi(argv[++i]);
-        else if (!strcmp(a, "--audio-period") && has)  audio_period = atoi(argv[++i]);
+        else if (!strcmp(a, "--audio-period") && has) {
+            audio_period = atoi(argv[++i]);
+            audio_rate_set = 1;
+        }
         else if (!strcmp(a, "--audio-rate") && has) {
             double r = atof(argv[++i]);
             if (r <= 0) die("--audio-rate tiene que ser positivo");
             audio_period = (int)(A5_CCK_PAL / r + 0.5);
+            audio_rate_set = 1;
         }
         else if (!strcmp(a, "--audio-gain") && has) {
             const char *v = argv[++i];
@@ -2170,6 +2179,74 @@ int main(int argc, char **argv)
                 free(a2.bytes); free(a2.recon);
                 a5buf_free(&s2.buf); free(s2.crc);
             }
+        }
+
+        /* H26: el disco no se deja sin usar. Si el video entro sin subir el
+         * umbral y todavia sobra, se sube la frecuencia del audio (sin cambiar
+         * el formato) hasta llenarlo, con tope en A5_AUDIO_FILL_MAX_HZ. Si
+         * se pidio una frecuencia, se respeta. Se rearma el stream y se
+         * comprueba que el video quede igual: mas muestras son mas llenados
+         * de audio y le quitan CPU al delta. */
+        if (!audio_rate_set && au.format != A5V_AUDIO_NONE && budget > 0 &&
+            rc.fits && qthr <= quality * 0.0015 + 1e-9 &&
+            total + 1024 < (size_t)budget) {
+            double secs = au.nsamples / au.hz;
+            double per_sample = au.format == A5V_AUDIO_PCM8 ? 1.0 : 0.5;
+            size_t video_part = total - au.nbytes;
+            double speed = pal_speedup ? A5_VIDEO_FPS / src.fps : 1.0;
+            int attempt, old_period = au.period;
+            size_t old_total = total;
+
+            for (attempt = 0; attempt < 8; attempt++) {
+                /* los paquetes van pares y cada frame lleva su tajada: se
+                 * deja un margen que crece si no entra */
+                long room = budget - (long)video_part - 2048L * (attempt + 1);
+                double hz = room / per_sample / secs;
+                int per;
+                A5Audio a2;
+                A5Stream s2;
+                float *x2;
+                size_t t2;
+
+                if (hz > A5_AUDIO_FILL_MAX_HZ) hz = A5_AUDIO_FILL_MAX_HZ;
+                per = (int)ceil(A5_CCK_PAL / hz);
+                if (per < 124) per = 124;
+                if (per >= au.period) break;          /* no gana nada */
+
+                memset(&a2, 0, sizeof a2);
+                a2.format = au.format;
+                a2.period = per;
+                a2.hz = A5_CCK_PAL / per;
+                a2.nsamples = a5_audio_samples_through((uint32_t)nframes - 1,
+                                                       a2.hz);
+                x2 = audio_input(in, start, duration, speed, a2.hz,
+                                 a2.nsamples, audio_filter);
+                if (audio_gain < 0) audio_code_auto(&a2, x2);
+                else                audio_code(&a2, x2, audio_gain);
+                free(x2);
+                build_stream(&s2, idx, nframes, scenes, nscenes, planes,
+                             ncolors, y0, y1, qthr, repeat_boost, cyc_limit,
+                             min_hold, max_late, &a2, NULL);
+                t2 = A5V_HEADER_SIZE + s2.buf.len;
+                if (t2 <= (size_t)budget && s2.degraded <= st.degraded &&
+                    s2.err_sum <= st.err_sum * 1.001) {
+                    free(au.bytes); free(au.recon);
+                    au = a2;
+                    a5buf_free(&st.buf); free(st.crc);
+                    st = s2;
+                    total = t2;
+                    break;
+                }
+                free(a2.bytes); free(a2.recon);
+                a5buf_free(&s2.buf); free(s2.crc);
+            }
+            if (au.period != old_period)
+                printf("audio llena: sobraba disco: %s a %.0f Hz (periodo %d, "
+                       "antes %d), SNR %.1f dB, +%lu bytes\n",
+                       au.format == A5V_AUDIO_FIB4 ? "fib4"
+                       : au.format == A5V_AUDIO_ADPCM ? "adpcm" : "pcm8",
+                       au.hz, au.period, old_period, au.snr,
+                       (unsigned long)(total - old_total));
         }
 
         /* Calidad contra la fuente del stream elegido: se lo arma una vez
