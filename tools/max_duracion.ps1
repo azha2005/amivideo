@@ -87,6 +87,7 @@ $n = [math]::Min([math]::Max(2, [int]($env:NUMBER_OF_PROCESSORS) / 2), 8)
 # lo: la mas larga que sirvio; hi: la mas corta que no (o el clip entero).
 "1. la duracion mas larga con $(1 -shl $Planes) colores, --min-hold $Hold y --size $Size"
 $lo = 1.0
+$okAlguna = $false
 $first = $true
 while ($hi - $lo -gt $Precision) {
   $step = ($hi - $lo) / ($n + 1)
@@ -94,13 +95,21 @@ while ($hi - $lo -gt $Precision) {
   if ($first) { $durs += $total }          # el clip entero, por si entra
   $first = $false
   $res = Probar @($durs | ForEach-Object { @{ d = $_; s = $Size } })
-  foreach ($r in ($res | Sort-Object d)) { if ($r.ok -and $r.d -gt $lo) { $lo = $r.d } }
+  foreach ($r in ($res | Sort-Object d)) {
+    if ($r.ok) { $okAlguna = $true }
+    if ($r.ok -and $r.d -gt $lo) { $lo = $r.d }
+  }
   $bad = $res | Where-Object { -not $_.ok -and $_.d -gt $lo } | Sort-Object d | Select-Object -First 1
   if ($bad) { $hi = [math]::Min($hi, $bad.d) }
   if ($lo -ge $total) { $hi = $lo }        # entra entero
 }
 $dur = [math]::Round($lo, 2)
 $size = $Size
+if (-not $okAlguna) {
+  "no entra limpio ni un tramo corto con estos parametros (mirar la columna 'peor': si pasa de 4 VBL"
+  "es la CPU, no el disco). Probar con -Hold mas alto, -Size mas chico o -Planes mas bajo."
+  exit 1
+}
 
 # --- 2. si entra entero, el tamano ----------------------------------------
 if ($dur -ge $total) {
