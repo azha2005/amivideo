@@ -1,14 +1,237 @@
 # A500VP
 
+**English** · [Español](#espanol)
+
+**Video with sound on an Amiga 500, from a single floppy disk.**
+
+Turns any video FFmpeg can read into a bootable DD floppy. No AmigaDOS or
+Workbench needed. Inspired by
+[GBVideoPlayer2](https://github.com/LIJI32/GBVideoPlayer2).
+
+```
+video.mp4 ──► ffmpeg ──► a500vp-enc ──► disk.adf ──► A500 / WinUAE
+                              │
+                              └──► a500vp-dec ──► preview.mp4 + verification
+```
+
+- Up to **32 colours** at 320×256 PAL, with a per-band palette driven by the
+  Copper.
+- **Mono audio**, fib4 or pcm8, at Paula's exact rate, with no drift.
+- **Delta coding** between two framebuffers, using the Blitter when it pays.
+- The encoder **fills the disk exactly** and simulates the 68000's decode
+  time (model measured in cycle-exact WinUAE).
+- The reference decoder **verifies** every frame and the audio by CRC.
+- Tested on a real A500 and in WinUAE with Kickstart 1.2.
+
+**Hardware:** A500 PAL, OCS, 68000 at 7 MHz, 512 KB Chip + 512 KB slow (A501),
+Kickstart 1.2 (1.3 intended too), DF0.
+
+**What fits on one disk** (depends on motion and colours):
+
+| video | length | colours | frames/s | audio |
+|---|---|---|---|---|
+| Anime opening | 22 s | 8 | 12.5 | fib4 8 kHz |
+| Film, lots of motion | 12 s | 32 | 12.5 | pcm8 8 kHz |
+| TV series intro | 27 s | 32 | 6.2 | fib4 8 kHz |
+| TV series intro | 30 s | 16 | 8.3 | fib4 8 kHz |
+
+Loading runs at ~18 KB/s: a full disk takes ~50 s before playback starts.
+
+---
+
+## Requirements (Windows, PowerShell)
+
+| tool | used for |
+|---|---|
+| gcc from [MSYS2](https://www.msys2.org/) UCRT64 (`pacman -S mingw-w64-ucrt-x86_64-gcc`) | encoder and decoder |
+| [vasm](http://sun.hasenbraten.de/vasm/) `vasmm68k_mot` (or `tools\get-vasm.ps1`) | player |
+| FFmpeg on the PATH (`winget install Gyan.FFmpeg`) | reading video, previews |
+| [WinUAE](https://www.winuae.net/) (optional) | testing without a floppy |
+
+The repo neither includes nor downloads Kickstart ROMs: use your own.
+
+## Building
+
+```powershell
+git clone https://github.com/azha2005/amivideo.git
+cd amivideo
+.\build.ps1        # or: .\build.ps1 -Gcc '...\gcc.exe' -Vasm '...\vasmm68k_mot.exe'
+```
+
+Leaves the encoder (`a500vp-enc.exe`), the decoder (`a500vp-dec.exe`) and the
+Amiga binaries (`boot.bin`, `player.bin`) in `work\`.
+
+> If PowerShell says *"running scripts is disabled"*:
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (once, no admin
+> needed), or run each script with `powershell -ExecutionPolicy Bypass -File ...`.
+
+---
+
+## Usage
+
+**Shortcut:** `.\build.ps1 disk -Video 'C:\Videos\opening.mp4' -Duration 22`
+encodes, verifies and leaves `work\a500vp.adf` and `work\preview.mp4`
+(8 colours, default settings).
+
+### 1. Encode
+
+`--auto` tries 32/16/8 colours, `--min-hold` 2 to 6 and image sizes from 100
+down to 60 %, refines the size in 2 % steps and encodes the best one:
+
+```powershell
+.\work\a500vp-enc.exe --auto --in 'C:\Videos\my_video.mp4' `
+  --start 44 --duration 12 --sharpen 0 `
+  --out work\my_video.a5v --adf work\my_video.adf `
+  --boot work\boot.bin --player work\player.bin
+```
+
+It discards candidates that run late or need a higher loss threshold (marked
+`granulado`, grainy). Among those within 2 points of the lowest error, it
+picks the most colours, then the largest image. Also check the error
+breakdown (colours / held image / compression) and the preview.
+
+To choose by hand, replace `--auto` with something like
+`--planes 5 --min-hold 2 --predict auto --band-rows 8`, and check (the
+encoder's output is in Spanish):
+
+```
+presupuesto: 888832 bytes, entra por 77068       ← must say "entra" (fits)
+vs. fuente : error 0.0492; 6.66% de los pixeles  ← lower is better
+tiempo real: ... el peor por 2 VBL               ← 2 or less is fine
+```
+
+### 2. Verify
+
+```powershell
+.\work\a500vp-dec.exe --in work\my_video.a5v --preview work\my_video_preview.mp4
+```
+
+It must print `VERIFICACION: OK`. The preview is exactly what the Amiga will
+show, except for the A500's low-pass filter (the real thing sounds a bit
+duller).
+
+### 3. Play
+
+- **WinUAE:** open `a500vp.uae`, pick your Kickstart and put the `.adf` in DF0.
+- **Real Amiga:** write the `.adf` to a DD floppy (Greaseweazle, ADF-Copy or
+  an ADF copier on the Amiga itself) and boot it.
+
+### Scripts in `tools\`
+
+They use `--sharpen 0 --stability 0.02 --max-late 4` and produce the `.adf`,
+the preview and the verification.
+
+**`max_duracion.ps1`**: the longest duration that fits cleanly (0.5 s
+precision). If the whole clip fits and you didn't set `-Size`, it grows the
+image.
+
+```powershell
+.\tools\max_duracion.ps1 -In 'C:\Videos\clip.mp4' -Name clip `
+  -Start 10 -Planes 4 -Hold 3 -Size 80 -Extra '--audio-channel','left'
+```
+
+| parameter | meaning | default |
+|---|---|---|
+| `-Planes` | 3/4/5 = 8/16/32 colours | 5 |
+| `-Hold` | 2/3/4 = 12.5/8.3/6.2 frames/s | 2 |
+| `-Size` | image size, 30–100 | 60 (grows if there's room) |
+| `-Start` | start second | 0 |
+| `-Extra` | extra encoder options | — |
+
+**`lote.ps1`**: encodes a list in `work\clips.psd1` with `--auto`:
+
+```powershell
+@{ Clips = @(
+  @{ n = 'house';  in = 'C:\Videos\house.mp4';  x = @('--duration', '27.35') }
+  @{ n = 'fringe'; in = 'C:\Videos\fringe.mp4' }
+) }
+```
+
+`.\tools\lote.ps1` (or `-Solo house,fringe`) leaves `work\<n>_auto.adf`, its
+preview, logs in `work\logs\` and a summary in `work\lote_resumen.txt`.
+
+---
+
+## Main options
+
+Full list: `.\work\a500vp-enc.exe --help`.
+
+| option | what it does |
+|---|---|
+| `--planes N` | 2–5 bitplanes (4–32 colours); default 3 |
+| `--band-rows N` | palette bands of N rows; with 4–5 planes, `8` |
+| `--min-hold N` | at most one new image every N×40 ms |
+| `--size P` | image at P % with a black border; shrinking it pays off more than dropping colours |
+| `--sharpen F` | edge enhancement (1.2); with 32 colours, `0` |
+| `--stability F` | quantiser hysteresis (0.07); `0.02` if it fits, fewer ghosts |
+| `--aspect M` | `letterbox`, `crop`, `stretch` |
+| `--dither M` | `none`, `bayer2`, `bayer4` |
+| `--predict auto` | uses the Blitter when it pays |
+| `--start`, `--duration` | trim, in seconds |
+| `--quality N` | allowed loss (0 = none); rises automatically if it doesn't fit |
+| `--budget BYTES` | byte limit (with `--adf`, whatever is left on the disk) |
+| `--max-late N` | VBLs of lateness tolerated per frame (2; scene cuts +4) |
+| `--rate pal` | frames 1:1, everything 4 % faster |
+| `--audio-format F` | `auto` (fib4, or pcm8 if there's room), `fib4`, `pcm8`, `none` |
+| `--audio-rate HZ` | 8006 by default; rises up to 11 kHz if there's room |
+| `--audio-channel C` | `auto`, `mix`, `left`, `right` |
+| `--audio-gain F` | gain, or `auto` |
+| `--source raw` | don't remove repeated frames from the source |
+
+**Converted sources:** by default (`--source auto`) the encoder detects and
+removes repeated frames from telecine and frame-rate conversions (e.g.
+30 → 25.05 fps). Interpolated 50/60 fps sources can't be fixed: if a 24/25 fps
+version exists, use that.
+
+---
+
+## How it works
+
+1. **Encoder (C):** scales to 160×128 logical pixels, quantises in Oklab per
+   band and emits deltas against the *simulated* state of both framebuffers,
+   so loss never accumulates. Builds the complete `.adf`.
+2. **Bootblock:** loads the player with `trackdisk.device`.
+3. **Player (68000):** loads everything into slow + Chip RAM, stops the motor
+   and takes over the hardware. Decodes into the hidden buffer and swaps on
+   VBL; the Copper doubles lines and changes palettes; audio runs on the
+   level 4 interrupt.
+4. **Reference decoder (C):** does bit for bit what the player does.
+
+Format: [`docs/FORMAT.md`](docs/FORMAT.md) (docs are in Spanish).
+
+```
+build.ps1          build, make disks, test in WinUAE
+a500vp.uae         WinUAE config (faithful A500, no ROM)
+encoder\           encoder, decoder and ADF writer (C11)
+player\            bootblock and player (vasm)
+tools\             get-vasm, shot, max_duracion, lote
+docs\              FORMAT, DECISIONS, ROADMAP, SETUP
+work\              output (ignored by git)
+```
+
+## Limitations
+
+- PAL only.
+- The whole video must fit in RAM: no streaming or multi-disk.
+- The screen stays black when playback ends.
+- `adpcm` exists in the encoder and decoder, but the player can't read it yet.
+
+Made by Az, from the idea behind
+[GBVideoPlayer2](https://github.com/LIJI32/GBVideoPlayer2) by LIJI32.
+
+---
+
+<a id="espanol"></a>
+
+# A500VP (español)
+
+[English](#a500vp) · **Español**
+
 **Video con sonido en una Amiga 500, desde un solo disquete.**
 
-A500VP convierte cualquier video que lea FFmpeg en un disquete DD booteable.
-Lo metés en la disquetera de una Amiga 500 de serie, esperás a que cargue y
-se reproduce con imagen y audio sincronizados. No hace falta ni AmigaDOS ni
-Workbench.
-
-Está inspirado en [GBVideoPlayer2](https://github.com/LIJI32/GBVideoPlayer2),
-que hace lo mismo para Game Boy.
+Convierte cualquier video que lea FFmpeg en un disquete DD booteable. No
+necesita AmigaDOS ni Workbench. Inspirado en
+[GBVideoPlayer2](https://github.com/LIJI32/GBVideoPlayer2).
 
 ```
 video.mp4 ──► ffmpeg ──► a500vp-enc ──► disco.adf ──► A500 / WinUAE
@@ -16,98 +239,68 @@ video.mp4 ──► ffmpeg ──► a500vp-enc ──► disco.adf ──► A5
                               └──► a500vp-dec ──► preview.mp4 + verificación
 ```
 
----
+- Hasta **32 colores** en 320×256 PAL, con paleta por franjas vía Copper.
+- **Audio mono** fib4 o pcm8 a la frecuencia exacta de Paula, sin deriva.
+- **Delta** entre dos framebuffers, con Blitter cuando conviene.
+- El encoder **llena el disco exacto** y simula el tiempo de decodificación
+  del 68000 (modelo medido en WinUAE cycle-exact).
+- El decoder de referencia **verifica** cada frame y el audio por CRC.
+- Probado en una A500 real y en WinUAE con Kickstart 1.2.
 
-## Características
+**Hardware:** A500 PAL, OCS, 68000 a 7 MHz, 512 KB Chip + 512 KB slow (A501),
+Kickstart 1.2 (pensado también para 1.3), DF0.
 
-- **Hasta 32 colores** (5 bitplanes) en 320×256 PAL, con paleta por franjas
-  horizontales que cambia el Copper.
-- **Audio mono** en fib4 (4 bits, ~4 KB/s) o pcm8, a la frecuencia exacta de
-  Paula. **Sin deriva:** en la medición llegaron 1100 VBL de 1100 esperados.
-- **Compresión delta** entre dos framebuffers. Cuando conviene, se usa el
-  Blitter para copiar el frame anterior.
-- **Control de tasa exacto:** el encoder llena el disquete sin pasarse ni un
-  byte.
-- **Tiempo real simulado:** el encoder calcula cuánto tarda el 68000 en
-  decodificar cada frame, con un modelo medido en WinUAE cycle-exact. Si un
-  frame no llegaría a tiempo, le baja la calidad.
-- **Verificación byte a byte:** el decoder de referencia reconstruye todo y
-  compara el CRC de cada frame y del audio con lo que simuló el encoder.
-- **Funciona en hardware real:** probado en una A500 real y en WinUAE con
-  Kickstart 1.2.
+**Qué entra en un disco** (depende del movimiento y los colores):
 
-## Hardware
-
-| | |
-|---|---|
-| Máquina | Amiga 500 PAL, OCS, 68000 a 7 MHz |
-| Memoria | 512 KB Chip + 512 KB slow (expansión A501) |
-| Kickstart | 1.2 (probado); pensado también para 1.3 |
-| Disquetera | DF0, disquete DD (880 KB) |
-
-## Cuánto entra en un disquete
-
-Depende del material: cuánto se mueve la imagen, cuántos colores pedís y
-cada cuánto cambia la imagen. Algunos casos reales:
-
-| video | duración | colores | imágenes/s | audio |
+| video | duración | colores | img/s | audio |
 |---|---|---|---|---|
 | Opening de anime | 22 s | 8 | 12,5 | fib4 8 kHz |
-| Escena de película, mucho movimiento | 12 s | 32 | 12,5 | pcm8 8 kHz |
+| Película, mucho movimiento | 12 s | 32 | 12,5 | pcm8 8 kHz |
 | Intro de serie | 27 s | 32 | 6,2 | fib4 8 kHz |
-| Intro de serie | 30 s entera | 16 | 8,3 | fib4 8 kHz |
+| Intro de serie | 30 s | 16 | 8,3 | fib4 8 kHz |
 
-La carga lee a ~18 KB/s. Un disco lleno tarda unos 50 s en arrancar a
-reproducir.
+Carga a ~18 KB/s: un disco lleno tarda ~50 s en arrancar.
 
 ---
 
-## Requisitos
+## Requisitos (Windows, PowerShell)
 
-Todo se hace en **Windows** con PowerShell.
+| herramienta | para qué |
+|---|---|
+| gcc de [MSYS2](https://www.msys2.org/) UCRT64 (`pacman -S mingw-w64-ucrt-x86_64-gcc`) | encoder y decoder |
+| [vasm](http://sun.hasenbraten.de/vasm/) `vasmm68k_mot` (o `tools\get-vasm.ps1`) | reproductor |
+| FFmpeg en el PATH (`winget install Gyan.FFmpeg`) | leer video, previews |
+| [WinUAE](https://www.winuae.net/) (opcional) | probar sin disquete |
 
-| Herramienta | Para qué | Dónde conseguirla |
-|---|---|---|
-| gcc (MSYS2 UCRT64) | encoder y decoder en C11 | [msys2.org](https://www.msys2.org/) → `pacman -S mingw-w64-ucrt-x86_64-gcc` |
-| vasm (`vasmm68k_mot`) | reproductor en ensamblador 68000 | [sun.hasenbraten.de/vasm](http://sun.hasenbraten.de/vasm/), o `tools\get-vasm.ps1` |
-| FFmpeg | leer el video y generar previews | `winget install Gyan.FFmpeg`, tiene que quedar en el PATH |
-| WinUAE (opcional) | probar sin grabar un disquete | [winuae.net](https://www.winuae.net/) |
-
-> **Kickstart:** el repo no incluye ROMs ni las descarga. Para WinUAE usá la
-> de tu propia Amiga.
+El repo no incluye ni descarga ROMs de Kickstart: usá la tuya.
 
 ## Compilar
 
 ```powershell
 git clone https://github.com/azha2005/amivideo.git
 cd amivideo
-.\build.ps1
+.\build.ps1        # o: .\build.ps1 -Gcc '...\gcc.exe' -Vasm '...\vasmm68k_mot.exe'
 ```
 
-Si tus herramientas están en otro lado, pasale las rutas:
+Deja en `work\` el encoder (`a500vp-enc.exe`), el decoder
+(`a500vp-dec.exe`) y los binarios de la Amiga (`boot.bin`, `player.bin`).
 
-```powershell
-.\build.ps1 -Gcc 'C:\msys64\ucrt64\bin\gcc.exe' -Vasm 'C:\vbcc\bin\vasmm68k_mot.exe'
-```
-
-Queda todo en `work\`:
-
-| archivo | qué es |
-|---|---|
-| `a500vp-enc.exe` | el encoder |
-| `a500vp-dec.exe` | el decoder de referencia |
-| `boot.bin`, `player.bin` | el bootblock y el reproductor que van dentro del disco |
+> Si PowerShell dice *"running scripts is disabled"*:
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (una vez, sin admin),
+> o corré cada script con `powershell -ExecutionPolicy Bypass -File ...`.
 
 ---
 
 ## Uso
 
+**Atajo:** `.\build.ps1 disk -Video 'C:\Videos\opening.mp4' -Duration 22`
+codifica, verifica y deja `work\a500vp.adf` y `work\preview.mp4`
+(8 colores, configuración por defecto).
+
 ### 1. Codificar
 
-La forma fácil es `--auto`: prueba 32, 16 y 8 colores, `--min-hold` de 2
-a 6 y la imagen al 100, 90, 80, 70 y 60 % en paralelo, afina el tamaño de
-a 2 %, muestra una tabla y codifica la elegida. Primero va la imagen: el
-audio solo mejora con lo que sobra.
+Con `--auto` prueba 32/16/8 colores, `--min-hold` 2 a 6 y la imagen del 100
+al 60 %, afina el tamaño de a 2 % y codifica la mejor:
 
 ```powershell
 .\work\a500vp-enc.exe --auto --in 'C:\Videos\mi_video.mp4' `
@@ -116,237 +309,133 @@ audio solo mejora con lo que sobra.
   --boot work\boot.bin --player work\player.bin
 ```
 
-```
-  colores  hold  img/s  tamano   error   (colores/sostenida/compresion)  umbral  tarde      audio        disco
-       32     2   12.5     80%   7.71%  (0.03/ 5.89/1.79)  0.0707     7, 1 VBL  fib4 17.6 dB  sobran 0 KB granulado
-       32     2   12.5     70%   6.70%  (0.02/ 6.67/0.00)  0.0000     8, 1 VBL  pcm8 35.0 dB  sobran 2 KB <- elegida
-       32     3    8.3     80%  10.83%  (0.03/10.81/0.00)  0.0000     8, 1 VBL  pcm8 35.1 dB  sobran 16 KB
+Descarta las que no llegan a tiempo o necesitan subir el umbral de pérdida
+(marcadas `granulado`). Entre las que están a menos de 2 puntos de la de
+menos error, elige la de más colores y después la más grande. Mirá también
+el reparto del error (colores / imagen sostenida / compresión) y la preview.
 
-auto       : afinando el tamano de 72% a 78% con 32 colores y --min-hold 2
-             72%: sirve, umbral 0.0000, 6.69%, sobran 10 KB
-             74%: no sirve, umbral 0.0272, 6.70%, sobran 0 KB
-auto       : elegida 32 colores con --min-hold 2 y --size 72
-```
-
-Sirven las que entran sin subir el umbral de pérdida y llegan a tiempo. Las
-que tuvieron que subirlo salen marcadas `granulado`: su error parece chico,
-pero los degradados se ven granulados. Entre las que sirven y están a menos
-de 2 puntos de la de menos error, gana la de más colores y después la más
-grande. El error se mide sobre la imagen, sin el borde. El número no lo dice
-todo: mirá el reparto (cuánto error viene de los colores, cuánto de sostener
-la imagen y cuánto de la compresión) y la preview.
-
-Para elegir a mano:
-
-```powershell
-.\work\a500vp-enc.exe --in 'C:\Videos\mi_video.mp4' `
-  --start 44 --duration 12 `
-  --planes 5 --min-hold 2 --sharpen 0 --predict auto --band-rows 8 `
-  --out work\mi_video.a5v --adf work\mi_video.adf `
-  --boot work\boot.bin --player work\player.bin
-```
-
-En la salida, fijate en tres líneas:
+A mano, reemplazá `--auto` por algo como
+`--planes 5 --min-hold 2 --predict auto --band-rows 8`, y revisá:
 
 ```
 presupuesto: 888832 bytes, entra por 77068       ← tiene que decir "entra"
 vs. fuente : error 0.0492; 6.66% de los pixeles  ← cuanto menos, mejor
-  de esos  : 0.5% por colores, 6.1% por imagen sostenida, 0.1% por compresion
 tiempo real: ... el peor por 2 VBL               ← 2 o menos está bien
 ```
 
-### 2. Verificar y ver la preview
+### 2. Verificar
 
 ```powershell
 .\work\a500vp-dec.exe --in work\mi_video.a5v --preview work\mi_video_preview.mp4
 ```
 
-Tiene que decir `VERIFICACION: OK`. La preview muestra exactamente lo que va
-a salir en la Amiga, con el audio ya decodificado. Solo le falta el filtro
-pasabajos de la A500, así que en la máquina real suena un poco más apagado.
+Tiene que decir `VERIFICACION: OK`. La preview es exactamente lo que se verá
+en la Amiga, salvo el filtro pasabajos de la A500 (suena algo más apagado).
 
 ### 3. Reproducir
 
 - **WinUAE:** abrí `a500vp.uae`, elegí tu Kickstart y poné el `.adf` en DF0.
-- **Amiga real:** grabá el `.adf` en un disquete DD (con Greaseweazle,
-  ADF-Copy, o desde la misma Amiga con un copiador de ADF) y booteá.
+- **Amiga real:** grabá el `.adf` en un DD (Greaseweazle, ADF-Copy o un
+  copiador desde la Amiga) y booteá.
 
-### Atajo
+### Scripts en `tools\`
 
-`build.ps1 disk` hace los tres pasos juntos con la configuración por defecto
-(8 colores, los primeros 22 s):
+Usan `--sharpen 0 --stability 0.02 --max-late 4` y generan `.adf`, preview y
+verificación.
 
-```powershell
-.\build.ps1 disk -Video 'C:\Videos\opening.mp4' -Duration 22
-# -> work\a500vp.adf y work\preview.mp4
-```
-
-### Scripts de utilidad
-
-Están en `tools\`. Usan las mismas opciones que dejan los discos limpios
-(`--sharpen 0 --stability 0.02 --max-late 4`), generan el `.adf`, la preview
-y la verificación.
-
-**La duración más larga que entra**, con colores, fluidez y tamaño fijos:
+**`max_duracion.ps1`**: la duración más larga que entra limpia (precisión de
+0,5 s). Si el clip entra entero y no fijaste `-Size`, agranda la imagen.
 
 ```powershell
-# 32 colores, 12,5 img/s, imagen al 60 % (lo que usa si no le decís nada)
-.\tools\max_duracion.ps1 -In 'C:\Videos\clip.mp4' -Name clip
-
-# desde el segundo 10, 16 colores, 8,3 img/s, imagen al 80 %, canal izquierdo
-.\tools\max_duracion.ps1 -In 'C:\Videos\clip.mp4' -Name clip -Start 10 `
-  -Planes 4 -Hold 3 -Size 80 -Extra '--audio-channel','left'
+.\tools\max_duracion.ps1 -In 'C:\Videos\clip.mp4' -Name clip `
+  -Start 10 -Planes 4 -Hold 3 -Size 80 -Extra '--audio-channel','left'
 ```
 
-| parámetro | qué fija | por defecto |
+| parámetro | significado | defecto |
 |---|---|---|
-| `-Planes` | 3 = 8 colores, 4 = 16, 5 = 32 | 5 |
-| `-Hold` | `--min-hold`: 2 = 12,5 img/s, 3 = 8,3, 4 = 6,2 | 2 |
-| `-Size` | tamaño de la imagen, 30 a 100; si no se da, es el mínimo y crece si el clip entra entero | 60 |
-| `-Start` | desde qué segundo | 0 |
-| `-Extra` | otras opciones del encoder | — |
+| `-Planes` | 3/4/5 = 8/16/32 colores | 5 |
+| `-Hold` | 2/3/4 = 12,5/8,3/6,2 img/s | 2 |
+| `-Size` | tamaño de imagen, 30–100 | 60 (crece si sobra) |
+| `-Start` | segundo inicial | 0 |
+| `-Extra` | opciones extra del encoder | — |
 
-Prueba varias duraciones en paralelo y se queda con la más larga que entra
-sin subir el umbral de pérdida, con medio segundo de precisión. Si el clip
-entra entero y no le diste `-Size`, sigue con el tamaño: agranda la imagen
-de a 2 % hasta donde sigue entrando limpia (con `-Size` fijo, lo respeta).
-Un clip de 30 s tarda uno o dos minutos.
-
-**Una lista de clips en tanda** con `--auto`, uno detrás de otro. La lista
-va en `work\clips.psd1` (fuera de git):
+**`lote.ps1`**: codifica con `--auto` una lista en `work\clips.psd1`:
 
 ```powershell
 @{ Clips = @(
-  @{ n = 'caniggia'; in = 'C:\Videos\caniggia.mp4'; x = @('--start', '10', '--duration', '25') }
-  @{ n = 'house';    in = 'C:\Videos\house.mp4';    x = @('--duration', '27.35', '--audio-channel', 'left') }
-  @{ n = 'fringe';   in = 'C:\Videos\fringe.mp4' }
+  @{ n = 'house';  in = 'C:\Videos\house.mp4';  x = @('--duration', '27.35') }
+  @{ n = 'fringe'; in = 'C:\Videos\fringe.mp4' }
 ) }
 ```
 
-```powershell
-.\tools\lote.ps1                        # todos
-.\tools\lote.ps1 -Solo caniggia,house   # algunos
-```
-
-Deja `work\<n>_auto.adf`, `work\<n>_auto_preview.mp4`, el log de cada uno en
-`work\logs\` y un resumen de todos en `work\lote_resumen.txt`.
-
-> **Si PowerShell dice "running scripts is disabled on this system":**
-> Windows bloquea los scripts por defecto. Para habilitarlos solo para tu
-> usuario, una vez y sin administrador:
-> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
-> Para no cambiar nada, corrélos así:
-> `powershell -ExecutionPolicy Bypass -File .\tools\max_duracion.ps1 -In ... -Name ...`
-> Lo mismo vale para `build.ps1`.
+`.\tools\lote.ps1` (o `-Solo house,fringe`) deja `work\<n>_auto.adf`, su
+preview, logs en `work\logs\` y un resumen en `work\lote_resumen.txt`.
 
 ---
 
-## Opciones
+## Opciones principales
 
-### Imagen
-
-| opción | qué hace | consejo |
-|---|---|---|
-| `--planes N` | 2 a 5 bitplanes = 4, 8, 16 o 32 colores (por defecto 3) | 5 se ve mucho mejor y cuesta más bytes |
-| `--band-rows N` | paleta por franjas de N filas lógicas | con 4 o 5 planos usá `8` |
-| `--min-hold N` | una imagen nueva como mucho cada N×40 ms | 2 = 12,5/s, 3 = 8,3/s, 4 = 6,2/s. Subirlo alarga el video |
-| `--sharpen F` | realce de bordes (por defecto 1.2) | con 32 colores, `0` |
-| `--stability F` | histéresis del cuantizador (por defecto 0.07): ahorra bytes en el ruido, pero deja fantasmas de lo que se mueve | `0.02` si sin subir el umbral entra |
-| `--aspect MODO` | `letterbox`, `crop` o `stretch` | letterbox además ahorra bytes |
-| `--size P` | la imagen al P % del cuadro, centrada con borde negro (por defecto 100) | si se ve granulado o con fantasmas, achicarla rinde más que bajar colores; `--auto` la busca sola |
-| `--dither MODO` | `none`, `bayer2` o `bayer4` | ordenado y estable; nunca difusión de error |
-| `--predict auto` | usa el Blitter cuando conviene | dejalo así |
-
-### Tiempo y tasa
+Lista completa: `.\work\a500vp-enc.exe --help`.
 
 | opción | qué hace |
 |---|---|
-| `--start S`, `--duration S` | recorte de la fuente, en segundos |
-| `--quality N` | pérdida permitida; 0 = sin pérdida. Si no entra, el control de tasa la sube solo y avisa (`perdida : umbral`): se ve granulado |
-| `--budget BYTES` | tope de bytes; con `--adf` es lo que queda en el disco |
-| `--max-late N` | VBL de atraso tolerados antes de bajarle la calidad a un frame (por defecto 2; los cortes de escena aguantan 4 más) |
-| `--rate pal` | frames 1:1, todo 4 % más rápido, como en la TV PAL |
+| `--planes N` | 2–5 bitplanes (4–32 colores); defecto 3 |
+| `--band-rows N` | paleta por franjas de N filas; con 4–5 planos, `8` |
+| `--min-hold N` | una imagen nueva cada N×40 ms como mucho |
+| `--size P` | imagen al P % con borde negro; achicarla rinde más que bajar colores |
+| `--sharpen F` | realce de bordes (1.2); con 32 colores, `0` |
+| `--stability F` | histéresis del cuantizador (0.07); `0.02` si entra, deja menos fantasmas |
+| `--aspect M` | `letterbox`, `crop`, `stretch` |
+| `--dither M` | `none`, `bayer2`, `bayer4` |
+| `--predict auto` | usa el Blitter cuando conviene |
+| `--start`, `--duration` | recorte en segundos |
+| `--quality N` | pérdida permitida (0 = ninguna); sube sola si no entra |
+| `--budget BYTES` | tope de bytes (con `--adf`, lo que queda en el disco) |
+| `--max-late N` | VBL de atraso tolerados por frame (2; cortes de escena +4) |
+| `--rate pal` | frames 1:1, todo 4 % más rápido |
+| `--audio-format F` | `auto` (fib4, o pcm8 si sobra), `fib4`, `pcm8`, `none` |
+| `--audio-rate HZ` | 8006 por defecto; sube hasta 11 kHz si sobra disco |
+| `--audio-channel C` | `auto`, `mix`, `left`, `right` |
+| `--audio-gain F` | ganancia o `auto` |
+| `--source raw` | no sacar frames repetidos de la fuente |
 
-### Audio
-
-| opción | qué hace | consejo |
-|---|---|---|
-| `--audio-format F` | `auto`, `fib4` (4 bits), `pcm8` (8 bits) o `none` | `auto` (por defecto) usa fib4, y pcm8 si el video entra sin pérdida y sobra disco |
-| `--audio-rate HZ` | frecuencia aproximada; se usa el período entero de Paula más cercano | 8006 por defecto, y si sobra disco sube sola hasta 11 kHz para no dejarlo sin usar; dándola, se respeta |
-| `--audio-channel C` | `auto`, `mix`, `left` o `right` | `auto` (por defecto) usa un solo canal si la mezcla borraría lo que está en contrafase |
-| `--audio-gain F` | ganancia antes de pasar a 8 bits, o `auto` | `auto` (por defecto): fib4 busca el mejor SNR, pcm8 lleva el pico a −1 dB |
-| `--no-audio` | sin audio | |
-
-La lista completa sale con `.\work\a500vp-enc.exe --help`.
-
----
-
-## Fuentes convertidas de otra frecuencia
-
-Muchos videos traen frames repetidos porque alguien los convirtió de una
-frecuencia a otra: telecine (29,97 desde 24), PAL subido a 30, película de
-24 pasada a 25, animación de 20 fps subida a 25. El encoder los detecta
-solo y los saca antes de codificar (`--source auto`, por defecto):
-
-```
-fuente     : 1 frame repetido cada 6 (97% de los intervalos regulares):
-             se sacan 99 de 600, 30.000 -> 25.050 fps
-```
-
-Si por algún motivo no querés que toque la fuente, usá `--source raw`.
-
-Las fuentes de 50 o 60 fps **interpoladas** no tienen repetidos y no tienen
-arreglo automático: el encoder avisa. Si existe la versión original a 24 o
-25 fps, conviene usar esa.
-
-Los nombres de archivo con caracteres Unicode (como los `｜` que ponen
-yt-dlp y otros) funcionan directo.
+**Fuentes convertidas:** por defecto (`--source auto`) el encoder detecta y
+saca los frames repetidos de telecine y conversiones de frecuencia (p. ej.
+30 → 25,05 fps). Las fuentes de 50/60 fps interpoladas no tienen arreglo:
+si existe la versión a 24/25 fps, usá esa.
 
 ---
 
 ## Cómo funciona
 
-1. **Encoder (C).** FFmpeg decodifica el video. El encoder escala a 160×128
-   lógicos, cuantiza en Oklab a la paleta de cada franja y genera deltas
-   contra el estado *simulado* de los dos framebuffers de la Amiga. Así
-   ninguna pérdida se acumula. Después arma el `.adf` entero: bootblock,
-   reproductor y datos.
-2. **Bootblock.** Lee el reproductor con `trackdisk.device` y salta a él.
-3. **Reproductor (68000).** Carga todo el video a RAM, repartido entre slow
-   RAM y Chip RAM, apaga el motor y toma el hardware. Cada frame se escribe en
-   el framebuffer oculto y se intercambia en el vertical blank. El Copper dobla
-   las líneas y cambia la paleta de cada franja. El audio se decodifica por
-   bloques en la interrupción de nivel 4.
-4. **Decoder de referencia (C).** Hace bit a bit lo mismo que el reproductor.
-   Sirve para ver el resultado y para detectar bugs sin tocar ensamblador.
+1. **Encoder (C):** escala a 160×128 lógicos, cuantiza en Oklab por franja y
+   genera deltas contra el estado *simulado* de los dos framebuffers, así no
+   se acumula pérdida. Arma el `.adf` completo.
+2. **Bootblock:** carga el reproductor con `trackdisk.device`.
+3. **Reproductor (68000):** carga todo a slow + Chip RAM, apaga el motor y
+   toma el hardware. Decodifica en el buffer oculto y cambia en el VBL; el
+   Copper dobla líneas y cambia paletas; el audio va por la interrupción de
+   nivel 4.
+4. **Decoder de referencia (C):** hace bit a bit lo mismo que el reproductor.
 
-El formato del bitstream está definido en [`docs/FORMAT.md`](docs/FORMAT.md).
-
-## Estructura
+Formato: [`docs/FORMAT.md`](docs/FORMAT.md).
 
 ```
 build.ps1          compilar, generar discos, probar en WinUAE
-a500vp.uae         configuración de WinUAE: A500 fiel, sin ROM
-encoder\           encoder, decoder de referencia y escritor de ADF (C11)
-player\            bootblock y reproductor (ensamblador 68000, vasm)
-tools\             get-vasm.ps1, shot.ps1, max_duracion.ps1, lote.ps1
-docs\FORMAT.md     formato del bitstream (la única definición)
-docs\DECISIONS.md  decisiones de diseño y mediciones, con fecha y método
-docs\ROADMAP.md    lo que sigue
-docs\SETUP.md      entorno de desarrollo en detalle
-work\              salida: discos, previews, binarios (ignorado por git)
+a500vp.uae         config de WinUAE (A500 fiel, sin ROM)
+encoder\           encoder, decoder y escritor de ADF (C11)
+player\            bootblock y reproductor (vasm)
+tools\             get-vasm, shot, max_duracion, lote
+docs\              FORMAT, DECISIONS, ROADMAP, SETUP
+work\              salida (ignorado por git)
 ```
 
 ## Limitaciones
 
 - Solo PAL.
-- Todo el video tiene que entrar en RAM: nada de streaming ni multidisco,
-  por ahora.
-- Al terminar queda la pantalla negra; no vuelve al sistema operativo.
-- El formato `adpcm` ya lo generan el encoder y el decoder de referencia,
-  pero el reproductor todavía no lo decodifica.
+- Todo el video entra en RAM: sin streaming ni multidisco.
+- Al terminar queda la pantalla negra.
+- `adpcm` existe en encoder y decoder, pero el reproductor todavía no lo lee.
 
-## Créditos
-
-Hecho por Az. La idea viene de
-[GBVideoPlayer2](https://github.com/LIJI32/GBVideoPlayer2), de LIJI32.
+Hecho por Az, a partir de la idea de
+[GBVideoPlayer2](https://github.com/LIJI32/GBVideoPlayer2) de LIJI32.
