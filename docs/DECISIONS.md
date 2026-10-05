@@ -2432,3 +2432,85 @@ con `--player`. Para CRC de audio, agregar `-DVERIFY_AUDIO=1` a la compilacion
 `BENCH` y pasar ese binario. `--rom`, `--winuae` y `--wait` permiten ajustar
 rutas/tiempo de corrida. El runner usa un ADF propio por tag y cierre normal
 del emulador, para que se vuelquen las pistas escritas.
+
+## 2026-10-05: RLE sin perdida para bajar la histeresis
+
+Prioridad de Az: histeresis lo mas cercana a cero posible, con la mayor
+duracion a esa calidad. No hace falta que sea exactamente cero. Se implementa
+`--rle auto|off` (off por defecto por compatibilidad): filas completas por
+plano con corridas de bytes iguales, mezcladas con el delta normal en cada
+paquete. Formato v7 solo cuando efectivamente hay RLE, reproductor compatible
+con v6/v7; el detalle de tokens esta en FORMAT.md.
+
+Una corrida expande el byte a palabra una sola vez y repite escrituras.
+Se elige una fila solo si ocupa menos y su costo estimado no supera el de
+la ruta normal; ademas se verifican ahorro y costo del paquete completo,
+incluidos 150 ciclos estimados de entrada. No cambia ningun pixel ni exige
+subir la histeresis. El modelo RLE es conservador por instrucciones,
+validado con video real de 5 planos, no calibrado exhaustivamente para
+todos los modos DMA. Hay retorno al delta normal si no conviene.
+
+Muestras de 5 segundos, 5 planos, franjas de 8 filas, PCM8 11 kHz,
+`--min-hold 2 --sharpen 0 --denoise 0 --quality 0 --max-late 4
+--predict auto --budget 800000`. Encoder final, no la conversion del prototipo:
+
+| Clip | stability | Sin RLE (bytes) | RLE auto (bytes) | Ahorro |
+|---|---|---:|---:|---:|
+| See | 0 | 468264 | 463880 | 0,94% |
+| Fringe | 0 | 512638 | 498880 | 2,68% |
+| House | 0 | 277896 | 277832 | 0,02% |
+| See | 0,005 | 444466 | 439980 | 1,01% |
+| See | 0,01 | 429336 | 424986 | 1,01% |
+
+Son ganancias del bitstream completo, incluido audio. El reproductor normal
+crece de 7620 a 7752 bytes (132 bytes, un sector adicional de 512 bytes en
+el ADF), sin buffers de descompresion adicionales. En House el ahorro de
+esta muestra no compensa ese sector; en See y Fringe si. No extrapolar
+estos porcentajes a cualquier clip ni prometer una cantidad fija de segundos.
+
+La primera seleccion, basada solo en bytes, ahorro 4,35% en See con
+stability 0, pero aumento los frames atrasados de 5 a 33 y el peor atraso
+de 2 a 7 VBL en WinUAE A500 cycle-exact. **Descartada.** La seleccion por
+CPU del prototipo mantuvo 5/2 en See y 0/0 en Fringe, con CRC de ambos
+framebuffers identicos a sus referencias.
+
+Encoder integrado, See con stability 0,005: 5 frames atrasados, peor 2 VBL
+tanto sin RLE como con RLE. Media de delta 174994,58 frente a 174956,83 CCK;
+maximo 239960 frente a 240152 CCK. CRC finales de ambos framebuffers iguales,
+108 buffers de audio en ambas corridas. El tiempo medio practicamente no
+cambia. Resultados y discos de medicion en `work/bench/rle_native/`.
+
+Encoder integrado, Fringe con stability 0: 0 atrasos en ambas variantes;
+media 207976,26 frente a 206597,62 CCK (-0,66%), maximo 246779 frente a
+246987 CCK. CRC de ambos framebuffers identicos. La seleccion cambio una
+prediccion COPY por otra mas barata (58 copias frente a 57), manteniendo
+todos los frames y el audio iguales segun los CRC.
+
+Stability 0,005 con RLE baja 6,04% el tamano frente a stability 0 sin RLE
+en See. Con 0,01 baja 9,24%. Ese ahorro adicional es de la histeresis,
+**no es sin perdida**. Error contra la fuente: 0,0445 / 0,0446 / 0,0449
+para 0 / 0,005 / 0,01; la mayor parte del error visible sigue viniendo de
+imagen sostenida, no de compresion. Empezar por 0,005 si cero no alcanza,
+revisar el preview y subir solo lo necesario; no se cambia el default 0,07
+de los presets existentes en esta prueba.
+
+Validacion: build completo sin advertencias; `--rle off` produce See byte a
+byte igual al encoder del commit e865743. Los cinco streams RLE tienen
+todos los CRC por frame y audio iguales a sus referencias sin RLE y pasan
+el decoder. `tools/test_rle.c` prueba 500 idas y vueltas con 1..5 planos,
+filas uniformes, mezcladas, dispersas y aleatorias, igualdad de framebuffer
+y costo encoder/decoder, seleccion que nunca aumenta tamano/costo, datos
+truncados, filas duplicadas/desordenadas y tokens fuera de rango.
+Pendiente probar formato v7 en la A500 fisica; lo medido es WinUAE.
+
+Reproduccion de la prueba (rutas de fuente segun la maquina):
+
+```powershell
+& work/a500vp-enc.exe --in work/see30_src.mp4 --duration 5 --planes 5 --min-hold 2 --sharpen 0 --denoise 0 --stability 0.005 --quality 0 --max-late 4 --band-rows 8 --predict auto --budget 800000 --rle auto --out work/rle/see30_005_native.a5v
+python tools/bench.py --tag rle_native --stream work/rle/see30_005_native.a5v
+& C:\msys64\ucrt64\bin\gcc.exe -std=c11 -O2 -Wall -Wextra -pedantic tools/test_rle.c encoder/stream.c -o work/test_rle.exe -lm
+& work/test_rle.exe
+```
+
+Disco normal y preview de esa configuracion: `work/rle/see30_005_native.adf`
+y `work/rle/see30_005_native.mp4`. No reemplazan `work/run.adf`.

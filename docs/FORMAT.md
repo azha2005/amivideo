@@ -1,6 +1,6 @@
 # Formato del disco de A500VP
 
-**Version de formato: 6.** Define el disco, el arranque y el bitstream de
+**Versiones de formato: 6 y 7.** Define el disco, el arranque y el bitstream de
 video y audio.
 
 La version 2 no definia el contenido del audio de los paquetes (viajaba
@@ -12,6 +12,10 @@ paquete: copiar el buffer visible al oculto antes del delta. La 6 cambia
 como viaja la paleta por franjas -- cada franja hereda la de arriba y trae
 solo los colores que cambia -- y usa el byte 30 de la cabecera, antes
 reservado.
+
+La 7 agrega DELTA_RLE (operacion 2). El encoder conserva la version 6 salvo
+que `--rle auto` produzca algun paquete RLE. El reproductor y el decoder
+aceptan ambas; los reproductores anteriores no aceptan la version 7.
 
 Todo es **big-endian**. El 68000 lee el disco con punteros pelados, sin
 conversiones.
@@ -116,7 +120,7 @@ pasa el bootblock.
 | Offset | Tamano | Contenido |
 |---|---|---|
 | 0 | 4 | `"A5VP"` |
-| 4 | 2 | Version = 6 |
+| 4 | 2 | Version = 6 o 7 |
 | 6 | 2 | Flags. Bit 0 = hay audio |
 | 8 | 2 | Ancho logico = 160 |
 | 10 | 2 | Alto logico = 128 |
@@ -145,12 +149,12 @@ viaja en su propio paquete y la sincronia es trivial.
 | Offset | Tamano | Contenido |
 |---|---|---|
 | 0 | 2 | Longitud total del paquete en bytes, incluido este campo. **Siempre par** |
-| 2 | 1 | Operacion: 0 = DELTA, 1 = REPETICION |
+| 2 | 1 | Operacion: 0 = DELTA, 1 = REPETICION, 2 = DELTA_RLE (solo v7) |
 | 3 | 1 | Flags. Bit 0 = trae paleta. Bit 1 = copiar el buffer visible al oculto antes del delta |
 | 4 | 2 | Bytes de audio en este paquete |
 | 6 | … | Paleta (si el bit 0 esta prendido), ver abajo |
 | … | … | Audio (los bytes indicados en el offset 4) |
-| … | … | Delta (solo si la operacion es DELTA) |
+| … | … | Delta (operacion 0 o 2); sufijo RLE adicional si es 2 |
 | … | 0–1 | Relleno con cero hasta longitud par |
 
 El audio va **antes** del video para que el reproductor lo encuentre en un
@@ -244,11 +248,38 @@ cambiado: medido, en una fila modificada cambian en promedio 2,84 de 3
 planos, y escribir el plano que sobra sale mas barato que describir cuales
 cambiaron.
 
+### DELTA_RLE (version 7)
+
+Tras un delta comun, que puede tener el mapa de filas vacio, viene un byte
+con la cantidad de filas RLE (0..128). Cada fila lleva un byte Y (0..127,
+en orden estrictamente ascendente), seguido de los planos 0..bitplanes-1.
+Las filas que el encoder elige para RLE no estan marcadas en el delta comun.
+
+Cada plano se expande a exactamente **20 bytes logicos** de la fila completa:
+
+| Token | Contenido siguiente | Expansion |
+|---|---|---|
+| 0..127 | token + 1 bytes literales | Copiar esos bytes |
+| 128..255 | Un byte | Repetirlo (token & 127) + 3 veces |
+
+Un token no puede cruzar el limite de 20 bytes. El decoder de referencia
+rechaza filas fuera de rango o desordenadas, tokens incompletos y expansiones
+que sobrepasen ese limite. La Amiga confia en el bitstream validado.
+El doblado horizontal usa la misma tabla de DELTA. Una corrida consulta la
+tabla una sola vez y escribe la palabra resultante varias veces.
+
+RLE conserva exactamente los pixeles, paletas, audio e intercambio de buffers.
+La seleccion del encoder exige ahorro de bytes y costo estimado no mayor al
+delta normal, incluyendo 150 ciclos de entrada por paquete RLE. El modelo
+por fila es `200 + 40*planos + 48*literales + 18*repetidos + 100*tokens`:
+estimacion conservadora por instrucciones, comprobada con clips reales de
+5 planos en WinUAE cycle-exact; no una calibracion exhaustiva de todos los DMA.
+
 ### Semantica (lo que hace el reproductor)
 
 - Hay dos framebuffers planares, A y B, cada uno con su copper list. Al
   empezar los dos estan en cero (negro) y se ve A.
-- **DELTA:** se escriben los bytes en el buffer **oculto**. Cada byte logico
+- **DELTA / DELTA_RLE:** se escriben los bytes en el buffer **oculto**. Cada byte logico
   se expande a una palabra con la tabla de doblado de 256 entradas (cada
   pixel logico ocupa 2 pixeles de pantalla). Si el paquete trae paleta, se
   escribe en el copper list del buffer oculto. En el vertical blank se

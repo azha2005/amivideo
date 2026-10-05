@@ -664,6 +664,7 @@ int main(int argc, char **argv)
     long total_rows = 0, total_cols = 0;
     int nrepeat = 0, ndelta = 0, npal = 0, bad = 0, maxcyc_frame = 0;
     long total_same = 0;               /* bytes que no cambian nada */
+    long total_rle_rows = 0, total_rle_wire = 0;
     int ncopy = 0;
     uint32_t n;
 
@@ -697,7 +698,7 @@ int main(int argc, char **argv)
     if (!data) die("no pude leer el bitstream");
     if (len < A5V_HEADER_SIZE || memcmp(data, A5V_MAGIC, 4))
         die("no es un archivo A5VP");
-    if (be16(data + 4) != A5V_VERSION)
+    if (be16(data + 4) != A5V_VERSION && be16(data + 4) != A5V_VERSION_RLE)
         die("version de formato distinta");
 
     w        = (int)be16(data + 8);
@@ -843,7 +844,7 @@ int main(int argc, char **argv)
         pk += alen;                     /* el audio llega en el Hito 5 */
         if (pk > pkend) die("audio incompleto");
 
-        if (op == A5V_OP_DELTA) {
+        if (op == A5V_OP_DELTA || op == A5V_OP_RLE) {
             /* El delta se dibuja en el buffer oculto y despues se intercambia:
              * exactamente lo que hace el reproductor escribiendo COP1LC en el
              * vertical blank. */
@@ -865,6 +866,14 @@ int main(int argc, char **argv)
             }
             q = a5_delta_apply(fb[visible ^ 1], pk, pkend, planes, &ds);
             if (!q) die("delta corrupto");
+            if (op == A5V_OP_RLE) {
+                const uint8_t *rle_start = q;
+                if (be16(data + 4) != A5V_VERSION_RLE) die("RLE requiere version 7");
+                q = a5_rle_rows_apply(fb[visible ^ 1], q, pkend, planes, &ds);
+                if (!q) die("RLE corrupto");
+                total_rle_rows += ds.rle_rows;
+                total_rle_wire += (long)(q - rle_start);
+            }
             delta_used = (long)(q - pk);
             visible ^= 1;
             ndelta++;
@@ -960,10 +969,16 @@ int main(int argc, char **argv)
            (long)ndelta * A5_ROWMASK_SIZE,
            100.0 * ndelta * A5_ROWMASK_SIZE / len);
     printf("  mascara de columnas  %8ld  (%4.1f%%)\n",
-           total_rows * A5_COLMASK_SIZE,
-           100.0 * total_rows * A5_COLMASK_SIZE / len);
+           (total_rows - total_rle_rows) * A5_COLMASK_SIZE,
+           100.0 * (total_rows - total_rle_rows) * A5_COLMASK_SIZE / len);
     printf("  datos literales      %8ld  (%4.1f%%)\n",
-           total_bytes, 100.0 * total_bytes / len);
+           total_bytes - total_rle_rows * A5_ROWBYTES * planes,
+           100.0 * (total_bytes - total_rle_rows * A5_ROWBYTES * planes) / len);
+    if (total_rle_wire) {
+        printf("  sufijos RLE          %8ld  (%4.1f%%), %ld filas\n",
+               total_rle_wire, 100.0 * total_rle_wire / len, total_rle_rows);
+        printf("escrituras : %ld bytes logicos, incluidos los expandidos de RLE\n", total_bytes);
+    }
     /* De cada columna se escriben TODOS los planos, cambien o no. Cuantos
      * no cambiaban dice cuanto se ahorraria una mascara de planos. */
     printf("     de esos, %ld (%.1f%%) escriben lo que ya estaba: %.2f de "

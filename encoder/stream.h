@@ -9,6 +9,7 @@
 
 #define A5V_MAGIC        "A5VP"
 #define A5V_VERSION      6
+#define A5V_VERSION_RLE  7
 #define A5V_HEADER_SIZE  32
 
 /* Formato del audio (byte 28 de la cabecera, desde la version 3). */
@@ -52,6 +53,7 @@
 /* op del paquete */
 #define A5V_OP_DELTA     0
 #define A5V_OP_REPEAT    1
+#define A5V_OP_RLE       2       /* v7: delta comun + filas RLE */
 
 /* flags del paquete */
 #define A5V_F_PALETTE    0x01
@@ -192,22 +194,31 @@ void a5_depack_row(const uint8_t *planar, int planes, uint8_t *idx_row);
 typedef struct {
     int  rows;        /* filas logicas modificadas */
     int  cols;        /* columnas (byte logico x todos los planos) escritas */
-    int  bytes;       /* bytes literales escritos = cols * planos */
+    int  bytes;       /* bytes logicos escritos (incluye expansion RLE) */
     int  same;        /* de esos, los que escriben lo que ya estaba */
     long cycles;      /* costo estimado de decodificacion */
     int  full_rows;   /* mascara de las 20 columnas: ruta densa de 3-5 planos */
+    int  rle_rows;    /* incluidas en rows/cols/bytes, excluidas de full_rows */
+    long rle_cycles;  /* tokens y escrituras, mas entrada a la rutina */
 } A5DeltaStats;
 
 /* Codifica la diferencia entre el buffer oculto y el frame objetivo, los dos
  * como arreglos de indices de A5_W*A5_H. Devuelve 1 si hubo algo que escribir. */
 int  a5_delta_encode(A5Buf *out, const uint8_t *hidden, const uint8_t *target,
                      int planes, A5DeltaStats *st);
+/* Seleccion sin perdida: solo filas que ahorran bytes y costo estimado. */
+int  a5_delta_encode_rle(A5Buf *out, const uint8_t *hidden, const uint8_t *target,
+                         int planes, A5DeltaStats *st);
 
 /* Aplica un delta sobre un framebuffer planar de planes*A5_H*A5_ROWBYTES.
  * Devuelve el puntero justo despues del delta, o NULL si el dato esta roto. */
 const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
                               const uint8_t *end, int planes,
                               A5DeltaStats *st);
+
+const uint8_t *a5_rle_rows_apply(uint8_t *fb, const uint8_t *data,
+                                const uint8_t *end, int planes,
+                                A5DeltaStats *st);
 
 /* Cuenta el costo de un delta ya codificado sin aplicarlo. */
 long a5_delta_cost(const A5DeltaStats *st, int planes);

@@ -160,7 +160,10 @@ entry:
         cmp.l   #$41355650,(a0)               ; "A5VP"
         bne     badhdr
         cmp.w   #6,4(a0)                      ; version de formato
+        beq.s   .versionok
+        cmp.w   #7,4(a0)
         bne     badhdr
+.versionok:
         moveq   #0,d6
         move.b  12(a0),d6                     ; d6 = bitplanes
         beq     badhdr
@@ -479,8 +482,8 @@ entry:
 .frame: cmp.l   V_BLK1END(a4),a5              ; fin del bloque 1: seguir en el 2
         bne.s   .inblk
         move.l  V_BLK2(a4),a5
-.inblk: tst.b   2(a5)                         ; op
-        bne     .advance                      ; REPETICION: no se toca nada
+.inblk: cmp.b   #1,2(a5)                     ; REPETICION: no se toca nada
+        beq     .advance
 
 .wait:  tst.w   V_PENDING(a4)                 ; el oculto todavia se ve
         bne.s   .wait
@@ -519,6 +522,10 @@ entry:
         endc
 
         bsr     apply_delta
+        cmp.b   #2,2(a5)
+        bne.s   .norle
+        bsr     apply_rle_rows
+.norle:
 
         ifd     BENCH
         lea     V_STAMP1(a4),a1

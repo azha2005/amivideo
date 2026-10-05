@@ -164,6 +164,7 @@ Full list: `.\work\a500vp-enc.exe --help`.
 | `--size P` | image at P % with a black border; shrinking it pays off more than dropping colours |
 | `--sharpen F` | edge enhancement (1.2); with 32 colours, `0` |
 | `--stability F` | quantiser hysteresis (0.07); `0.02` if it fits, fewer ghosts |
+| `--rle auto\|off` | lossless row compression when estimated size and CPU improve (off); format v7 when used |
 | `--aspect M` | `letterbox`, `crop`, `stretch` |
 | `--dither M` | `none`, `bayer2`, `bayer4` |
 | `--predict auto` | uses the Blitter when it pays |
@@ -385,6 +386,7 @@ Lista completa: `.\work\a500vp-enc.exe --help`.
 | `--size P` | imagen al P % con borde negro; achicarla rinde más que bajar colores |
 | `--sharpen F` | realce de bordes (1.2); con 32 colores, `0` |
 | `--stability F` | histéresis del cuantizador (0.07); `0.02` si entra, deja menos fantasmas |
+| `--rle auto\|off` | compresión de filas sin pérdida cuando mejora tamaño y CPU estimada (off); formato v7 si se usa |
 | `--aspect M` | `letterbox`, `crop`, `stretch` |
 | `--dither M` | `none`, `bayer2`, `bayer4` |
 | `--predict auto` | usa el Blitter cuando conviene |

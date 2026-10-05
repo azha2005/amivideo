@@ -37,6 +37,7 @@ static int g_band_rows = 0, g_band_y0 = 0, g_nbands = 1;
  * hace un MOVE por color en el borde horizontal y no le entran muchos; el
  * limite esta medido en DECISIONS.md. */
 static int g_band_colors = 0;
+static int g_rle = 0;       /* opt-in: conserva la compatibilidad v6 por defecto */
 
 /* La paleta con que se ve la fila logica y. */
 static const A5Palette *rowpal(const A5Palette *pals, int y)
@@ -311,6 +312,7 @@ static const uint8_t *audio_slice(const A5Audio *au, size_t n, size_t *len)
 typedef struct {
     A5Buf  buf;             /* solo los paquetes, sin cabecera */
     int    npackets, nrepeat, ndelta, npalette;
+    int    nrle;
     int    ncopy;           /* deltas que piden la copia del visible (H12) */
     size_t maxpacket;
     int    maxpacket_frame;
@@ -655,7 +657,8 @@ static void try_delta(Cand *c, const uint8_t *base, const uint8_t *ideal,
         memcpy(c->tgt, ideal, fsz);
         apply_quality(c->tgt, base, pal, y0, y1, thr, thr);
         c->video.len = 0;
-        a5_delta_encode(&c->video, base, c->tgt, planes, &c->ds);
+        if (g_rle) a5_delta_encode_rle(&c->video, base, c->tgt, planes, &c->ds);
+        else a5_delta_encode(&c->video, base, c->tgt, planes, &c->ds);
         c->cycles = c->ds.cycles + extra;
         c->late = late_vbls(t_free, c->cycles, due, P, fillp, fillc);
         capped = !cyc_limit || c->cycles <= cyc_limit;
@@ -834,9 +837,10 @@ static void build_stream(A5Stream *st, const uint8_t *idx, size_t nframes,
         }
         t_free = due + late * P;              /* el intercambio de este delta */
 
-        put_packet(st, A5V_OP_DELTA, newscene ? pal : NULL, ncolors,
+        put_packet(st, best->ds.rle_rows ? A5V_OP_RLE : A5V_OP_DELTA, newscene ? pal : NULL, ncolors,
                    &best->video, ab, alen, best->copy ? A5V_F_COPY : 0);
         st->ndelta++;
+        if (best->ds.rle_rows) st->nrle++;
         if (newscene) st->npalette++;
         last_delta = n;
 
@@ -1394,6 +1398,7 @@ static void usage(void)
 "                          frame distinto) o visible (siempre el ultimo,\n"
 "                          copiandolo antes con el Blitter). auto\n"
 "  --stability F           histeresis temporal del cuantizador (0.07)\n"
+"  --rle auto|off          filas RLE sin perdida, si ahorran bytes y CPU (off)\n"
 "  --max-late N            VBL de atraso que se toleran antes de degradar\n"
 "                          un frame (2); el atraso se simula con el modelo\n"
 "                          de costo medido en el Hito 4\n"
@@ -1512,6 +1517,12 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--budget") && has)        budget = atol(argv[++i]);
         else if (!strcmp(a, "--repeat-boost") && has) repeat_boost = atof(argv[++i]);
         else if (!strcmp(a, "--stability") && has)     stability = atof(argv[++i]);
+        else if (!strcmp(a, "--rle") && has) {
+            const char *mode = argv[++i];
+            if (!strcmp(mode, "auto")) g_rle = 1;
+            else if (!strcmp(mode, "off")) g_rle = 0;
+            else die("--rle: auto u off");
+        }
         else if (!strcmp(a, "--frame-ms") && has)      frame_ms = atof(argv[++i]);
         else if (!strcmp(a, "--start") && has)         start = atof(argv[++i]);
         else if (!strcmp(a, "--duration") && has)      duration = atof(argv[++i]);
@@ -2393,6 +2404,7 @@ int main(int argc, char **argv)
                            y0, y1, g_band_rows, g_band_colors,
                            (uint32_t)nframes,
                            (uint32_t)st.buf.len);
+            if (st.nrle) hdr.p[5] = A5V_VERSION_RLE;
             fwrite(hdr.p, 1, hdr.len, f);
             fwrite(st.buf.p, 1, st.buf.len, f);
             fclose(f);
@@ -2467,9 +2479,10 @@ int main(int argc, char **argv)
                (st.buf.len - au.nbytes) / 1024.0 / (nframes / A5_VIDEO_FPS),
                au.nbytes / 1024.0 / (nframes / A5_VIDEO_FPS));
         printf("decodif.   : peor delta %ld ciclos = %.1f ms (frame %d), "
-               "con el modelo medido\n",
+               "con el modelo %s\n",
                st.maxcycles, st.maxcycles * 1000.0 / A5_CPU_HZ,
-               st.maxcycles_frame);
+               st.maxcycles_frame, g_rle ? "mixto (RLE estimado)" : "medido");
+        if (g_rle) printf("RLE        : %d de %d deltas, sin perdida\n", st.nrle, st.ndelta);
         printf("tiempo real: %d frames se van a ver tarde, el peor por %d VBL "
                "(frame %d); %d degradados para no pasar de %d VBL\n",
                st.late_frames, st.max_late, st.max_late_frame, st.degraded,

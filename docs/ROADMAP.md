@@ -28,6 +28,7 @@ que medirlas antes de darlas por buenas.**
 | H26 el disco que sobra va al audio | **hecho** el 2026-09-15 |
 | H27 `--size` y tamanos en `--auto` | **hecho** el 2026-09-15 |
 | PCM8 por bloques, filas densas y configuracion del Blitter por copia | **hecho** el 2026-10-05; mediciones y costos en `DECISIONS.md` |
+| RLE de filas sin perdida, seleccionado por espacio y CPU | **hecho**, optativo `--rle auto`, formato v7; probado en WinUAE, pendiente A500 real |
 
 ---
 

@@ -184,6 +184,58 @@ apply_delta:
         rts
 
 ;----------------------------------------------------------------------
+; apply_rle_rows - v7: cuenta de filas, Y y tokens por plano.
+; Tokens 0..127: 1..128 literales. 128..255: repetir 3..130 veces.
+; Cada plano termina exactamente a los 20 bytes. Los paquetes se validan
+; en el decoder de referencia antes de reproducirlos.
+; a0 = datos, a2 = framebuffer, a3 = doblado, d6 = planos. Devuelve a0.
+;----------------------------------------------------------------------
+apply_rle_rows:
+        movem.l d0-d7/a1/a4-a5,-(sp)
+        moveq   #0,d5
+        move.b  (a0)+,d5
+        beq     .done
+        subq.w  #1,d5
+.row:   moveq   #0,d0
+        move.b  (a0)+,d0
+        mulu    #FB_ROWBYTES,d0
+        lea     0(a2,d0.w),a5
+        move.w  d6,d4
+        subq.w  #1,d4
+.plane: move.l  a5,a1
+        moveq   #20,d3
+.token: moveq   #0,d0
+        move.b  (a0)+,d0
+        bmi.s   .run
+        addq.w  #1,d0
+        sub.w   d0,d3
+        subq.w  #1,d0
+.lit:   moveq   #0,d7
+        move.b  (a0)+,d7
+        add.w   d7,d7
+        move.w  0(a3,d7.w),(a1)+
+        dbf     d0,.lit
+        bra.s   .more
+.run:   and.w   #127,d0
+        addq.w  #3,d0
+        sub.w   d0,d3
+        subq.w  #1,d0
+        moveq   #0,d7
+        move.b  (a0)+,d7
+        add.w   d7,d7
+        move.w  0(a3,d7.w),d7
+.repeat:
+        move.w  d7,(a1)+
+        dbf     d0,.repeat
+.more:  tst.w   d3
+        bne.s   .token
+        lea     PLANE_BYTES(a5),a5
+        dbf     d4,.plane
+        dbf     d5,.row
+.done:  movem.l (sp)+,d0-d7/a1/a4-a5
+        rts
+
+;----------------------------------------------------------------------
 ; build_copper - arma un copper list de reproduccion.
 ;   a0 = copper list, a2 = framebuffer, d6 = bitplanes
 ; Los colores quedan en negro: los pone write_palette. Usa las franjas

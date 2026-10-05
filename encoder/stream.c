@@ -103,10 +103,11 @@ long a5_delta_cost(const A5DeltaStats *st, int planes)
     long dense_bytes = full * A5_ROWBYTES * planes;
     long dense_byte_cost = planes >= 5 ? A5_CYC_FULL_BYTE_5PL : A5_CYC_FULL_BYTE;
     return A5_CYC_FRAME
-         + ((long)st->rows - full) * (planes >= 3 ? A5_CYC_ROW : A5_CYC_ROW_GENERIC)
-         + ((long)st->cols - full * A5_ROWBYTES) * A5_CYC_COL
-         + ((long)st->bytes - dense_bytes) * a5_cyc_byte(planes)
-         + full * A5_CYC_FULL_ROW + dense_bytes * dense_byte_cost;
+         + ((long)st->rows - full - st->rle_rows) * (planes >= 3 ? A5_CYC_ROW : A5_CYC_ROW_GENERIC)
+         + ((long)st->cols - (full + st->rle_rows) * A5_ROWBYTES) * A5_CYC_COL
+         + ((long)st->bytes - dense_bytes - st->rle_rows * A5_ROWBYTES * planes) * a5_cyc_byte(planes)
+         + full * A5_CYC_FULL_ROW + dense_bytes * dense_byte_cost
+         + st->rle_cycles;
 }
 
 int a5_delta_encode(A5Buf *out, const uint8_t *hidden, const uint8_t *target,
@@ -205,6 +206,131 @@ const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
             st->bytes += planes;
         }
     }
+    st->cycles = a5_delta_cost(st, planes);
+    return data;
+}
+
+/* Modelo conservador contado por instrucciones; validado en clips reales
+ * con 5 planos, no una regresion calibrada para todos los modos DMA. */
+static long rle_row_cost(int planes, int literals, int repeats, int tokens)
+{
+    return 200 + planes * 40 + literals * 48L + repeats * 18L + tokens * 100L;
+}
+
+int a5_delta_encode_rle(A5Buf *out, const uint8_t *hidden, const uint8_t *target,
+                        int planes, A5DeltaStats *st)
+{
+    A5Buf raw, plain, runs;
+    A5DeltaStats original, candidate;
+    uint8_t mask[A5_ROWMASK_SIZE], pt[A5_MAX_PLANES * A5_ROWBYTES];
+    size_t off = A5_ROWMASK_SIZE;
+    int y, changed;
+    a5buf_init(&raw); a5buf_init(&plain); a5buf_init(&runs);
+    changed = a5_delta_encode(&raw, hidden, target, planes, &original);
+    candidate = original;
+    memcpy(mask, raw.p, sizeof mask);
+    for (y = 0; y < A5_H; y++) {
+        uint8_t packed[A5_MAX_PLANES * (A5_ROWBYTES + 1)];
+        size_t start = off;
+        int cols = 0, p, b, n = 0, literals = 0, repeats = 0, tokens = 0;
+        long plain_cost, cost;
+        if (!(mask[y >> 3] & (0x80 >> (y & 7)))) continue;
+        for (b = 0; b < A5_ROWBYTES; b++)
+            if (raw.p[off + (b >> 3)] & (0x80 >> (b & 7))) cols++;
+        off += A5_COLMASK_SIZE + cols * planes;
+        a5_planarize_row(target + (size_t)y * A5_W, planes, pt);
+        for (p = 0; p < planes; p++) {
+            const uint8_t *row = pt + p * A5_ROWBYTES;
+            int i = 0, first = 0;
+            while (i < A5_ROWBYTES) {
+                int j = i + 1;
+                while (j < A5_ROWBYTES && row[j] == row[i]) j++;
+                if (j - i >= 3) {
+                    if (i > first) {
+                        packed[n++] = (uint8_t)(i - first - 1);
+                        memcpy(packed + n, row + first, i - first);
+                        n += i - first; literals += i - first; tokens++;
+                    }
+                    packed[n++] = (uint8_t)(128 + j - i - 3);
+                    packed[n++] = row[i]; repeats += j - i; tokens++;
+                    i = first = j;
+                } else i++;
+            }
+            if (i > first) {
+                packed[n++] = (uint8_t)(i - first - 1);
+                memcpy(packed + n, row + first, i - first);
+                n += i - first; literals += i - first; tokens++;
+            }
+        }
+        plain_cost = cols == A5_ROWBYTES && planes >= 3
+            ? A5_CYC_FULL_ROW + cols * planes * (planes >= 5 ? A5_CYC_FULL_BYTE_5PL : A5_CYC_FULL_BYTE)
+            : (planes >= 3 ? A5_CYC_ROW : A5_CYC_ROW_GENERIC) + cols * (A5_CYC_COL + planes * a5_cyc_byte(planes));
+        cost = rle_row_cost(planes, literals, repeats, tokens);
+        if ((size_t)(n + 1) < off - start && cost <= plain_cost) {
+            mask[y >> 3] &= (uint8_t)~(0x80 >> (y & 7));
+            a5buf_put8(&runs, y); a5buf_write(&runs, packed, n);
+            candidate.rle_rows++; candidate.rle_cycles += cost;
+            candidate.cols += A5_ROWBYTES - cols;
+            candidate.bytes += (A5_ROWBYTES - cols) * planes;
+            if (cols == A5_ROWBYTES) candidate.full_rows--;
+        } else a5buf_write(&plain, raw.p + start, off - start);
+    }
+    if (candidate.rle_rows) candidate.rle_cycles += 150;
+    candidate.cycles = a5_delta_cost(&candidate, planes);
+    if (candidate.rle_rows && sizeof mask + plain.len + 1 + runs.len < raw.len
+        && candidate.cycles <= original.cycles) {
+        a5buf_write(out, mask, sizeof mask);
+        if (plain.len) a5buf_write(out, plain.p, plain.len);
+        a5buf_put8(out, candidate.rle_rows); a5buf_write(out, runs.p, runs.len);
+        *st = candidate;
+    } else { a5buf_write(out, raw.p, raw.len); *st = original; }
+    a5buf_free(&raw); a5buf_free(&plain); a5buf_free(&runs);
+    return changed;
+}
+
+/* v7: filas completas, orden plano/columna; tokens por plano.
+ * Cada token debe terminar dentro de sus 20 bytes, nunca cruza de plano. */
+const uint8_t *a5_rle_rows_apply(uint8_t *fb, const uint8_t *data,
+                                const uint8_t *end, int planes,
+                                A5DeltaStats *st)
+{
+    int rows, i, p, last = -1;
+    if (data >= end) return NULL;
+    rows = *data++;
+    if (rows > A5_H) return NULL;
+    for (i = 0; i < rows; i++) {
+        int y, literals = 0, repeats = 0, tokens = 0;
+        if (data >= end) return NULL;
+        y = *data++;
+        if (y >= A5_H || y <= last) return NULL;
+        last = y;
+        for (p = 0; p < planes; p++) {
+            int col = 0;
+            while (col < A5_ROWBYTES) {
+                int token, count, j;
+                if (data >= end) return NULL;
+                token = *data++;
+                count = token < 128 ? token + 1 : (token & 127) + 3;
+                tokens++;
+                if (token < 128) literals += count; else repeats += count;
+                if (count > A5_ROWBYTES - col) return NULL;
+                if (end - data < (token < 128 ? count : 1)) return NULL;
+                for (j = 0; j < count; j++) {
+                    uint8_t value = token < 128 ? *data++ : *data;
+                    uint8_t *dst = fb + ((size_t)p * A5_H + y) * A5_ROWBYTES + col++;
+                    if (*dst == value) st->same++;
+                    *dst = value;
+                }
+                if (token >= 128) data++;
+            }
+        }
+        st->rows++;
+        st->rle_rows++;
+        st->rle_cycles += rle_row_cost(planes, literals, repeats, tokens);
+        st->cols += A5_ROWBYTES;
+        st->bytes += planes * A5_ROWBYTES;
+    }
+    if (rows) st->rle_cycles += 150;
     st->cycles = a5_delta_cost(st, planes);
     return data;
 }
