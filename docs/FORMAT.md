@@ -377,11 +377,12 @@ Las graba el reproductor de medicion (`player.s` ensamblado con
 `-DBENCH=1`) al terminar la reproduccion, despues de devolverle la maquina
 al sistema.
 
-**Sectores 1754–1758:** 640 longwords big-endian, una por paquete: los
+**Sectores 1754–1757:** 512 longwords big-endian, una por paquete: los
 color clocks (3 546 895 por segundo; la CPU hace 2 ciclos por cada uno) que
 tardo en decodificarse ese DELTA, medidos con el haz de video (VBL, linea y
 posicion horizontal). Cero para las repeticiones y para los paquetes
-despues del 640.
+despues del 512. El sector 1758 queda reservado; el reproductor actual no
+lo escribe.
 
 **Sector 1759:**
 
@@ -403,7 +404,7 @@ despues del 640.
 | 56 | 4 | Peor decodificacion, en color clocks |
 | 60 | 4 | Paquete de la peor decodificacion |
 | 64 | 4 | Deltas medidos |
-| 68 | 4 | Entradas de la tabla de tiempos (640) |
+| 68 | 4 | Entradas de la tabla de tiempos (512) |
 | 72 | 4 | Error de trackdisk al grabar la tabla (0 = bien) |
 | 76 | 4 | Interrupciones de audio (buffers que pidio Paula) |
 | 80 | 8 | Estampa de la primera: VBL (4), linea (2), color clock (2) |
@@ -416,7 +417,12 @@ despues del 640.
 | 116 | 4 | Color clocks copiando el visible al oculto con el Blitter, sumados |
 | 120 | 4 | La copia mas lenta, en color clocks |
 | 124 | 4 | Copias hechas (paquetes con el bit 1 de los flags) |
-| 128 | 384 | Cero |
+| 128 | 4 | CRC32 del framebuffer 0 completo, con bytes doblados |
+| 132 | 4 | CRC32 del framebuffer 1 completo, con bytes doblados |
+| 136 | 4 | `"AUDC"` solo con `-DVERIFY_AUDIO=1`; cero en la pasada normal |
+| 140 | 4 | CRC32 de los buffers de audio producidos, en orden |
+| 144 | 4 | Muestras incluidas en ese CRC (incluye buffer inicial y relleno final) |
+| 148 | 364 | Cero |
 
 Las estampas cuentan VBL con la interrupcion propia del reproductor; el
 tiempo en color clocks es `VBL x 313 x 227 + linea x 227 + color clock`.
@@ -425,3 +431,10 @@ entrada y salida de la interrupcion (unos 300 ciclos de CPU).
 
 `a500vp-dec --in <bitstream> --measure <disco.adf>` los cruza con las
 estadisticas de cada delta y ajusta el modelo de costo.
+
+Con `-DBENCH=1 -DVERIFY_AUDIO=1`, el decoder tambien compara el audio escrito
+en los buffers de Paula contra el flujo de referencia y su relleno (ultima
+muestra repetida). Exige que se haya producido todo el audio de la fuente.
+El CRC agrega trabajo a cada llenado: esta pasada sirve para correccion,
+**no para medir rendimiento**. La compilacion normal y `BENCH` sin
+`VERIFY_AUDIO` no incluyen ese trabajo.

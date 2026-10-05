@@ -109,7 +109,13 @@ V_BLTMAX    equ 220     ; l  la copia mas lenta
 V_NBLIT     equ 224     ; l  copias hechas
 V_BLTSIZE   equ 228     ; w  BLTSIZE de la copia (0 = sin filas activas)
 V_BLTOFF    equ 230     ; l  bytes hasta la primera fila activa
+        ifd     VERIFY_AUDIO                  ; pasada de correccion, no de tiempos
+V_AUDIOCRC  equ 234     ; l  CRC32 acumulado de los buffers producidos
+V_AUDION    equ 238     ; l  muestras incluidas (tambien relleno final)
+VARS_SIZE   equ 242
+        else
 VARS_SIZE   equ 234
+        endc
 
 ;----------------------------------------------------------------------
 ; Cabecera del reproductor. mkadf escribe donde quedaron los datos.
@@ -665,7 +671,7 @@ level3:
 ; buffer que se le encolo la vez anterior y lo esta tocando; el otro quedo
 ; libre. Se lo llena y se lo encola: lo engancha cuando termine este.
 ;
-; Llenarlo cuesta ~2 ms. Despues de acusar la interrupcion se baja la
+; El llenado puede ocupar varios ms. Despues de acusar la interrupcion se baja la
 ; prioridad a 2 para que el VBL (nivel 3) pueda interrumpir: si no, el
 ; intercambio de copper list podria caer ya dentro de la pantalla.
 ;----------------------------------------------------------------------
@@ -751,14 +757,37 @@ audio_fill:
         bne.s   .fib
         bra.s   .more
 
-.pcm:   move.b  (a1)+,d4                      ; pcm8: una muestra por byte
-        move.b  d4,(a0)+
-        subq.l  #1,d3
-        subq.w  #1,d5
+.pcm:   moveq   #0,d0                         ; tramo hasta el fin del paquete
+        move.w  d5,d0                         ; o del buffer, lo que llegue antes
+        cmp.l   d3,d0
+        bls.s   .pcmlen
+        move.l  d3,d0
+.pcmlen:
+        sub.l   d0,d3
+        sub.w   d0,d5
+        move.w  d0,d1
+        ; El formato entrega muestras pares por paquete, y los buffers
+        ; tienen 512 bytes: origen y destino siguen alineados a palabra.
+        lsr.w   #4,d0                         ; bloques de 16 bytes
+        beq.s   .pcmtail
+        subq.w  #1,d0
+.pcmblk:
+        movem.l (a1)+,d2/d4/a2-a3
+        movem.l d2/d4/a2-a3,(a0)
+        lea     16(a0),a0
+        dbf     d0,.pcmblk
+.pcmtail:
+        and.w   #15,d1
+        beq.s   .pcmlast
+        subq.w  #1,d1
+.pcmbyte:
+        move.b  (a1)+,(a0)+
+        dbf     d1,.pcmbyte
+.pcmlast:
+        move.b  -1(a0),d4                     ; ultima muestra, incluso en silencio
+        tst.w   d5
         beq.s   .done
-        tst.l   d3
-        bne.s   .pcm
-        bra.s   .more
+        bra     .more
 
 .silence:
         move.b  d4,(a0)+
@@ -767,8 +796,37 @@ audio_fill:
 .done:  move.l  a1,V_APTR(a4)
         move.l  d3,V_ALEFT(a4)
         move.w  d4,V_AACC(a4)
+        ifd     VERIFY_AUDIO
+        bsr     audio_crc                     ; fuera de las pasadas de rendimiento
+        endc
         movem.l (sp)+,d0-d5/a0-a3
         rts
+
+        ifd     VERIFY_AUDIO
+; CRC de TODO lo escrito a Paula, incluido el primer buffer y el silencio.
+; a0 apunta al final del buffer. La pasada normal no incluye esta rutina.
+audio_crc:
+        movem.l d0-d3/a0,-(sp)
+        lea     -AUD_SAMPLES(a0),a0
+        move.l  V_AUDIOCRC(a4),d0
+        not.l   d0
+        move.w  #AUD_SAMPLES-1,d1
+.byte:  moveq   #0,d2
+        move.b  (a0)+,d2
+        eor.l   d2,d0
+        moveq   #7,d3
+.bit:   lsr.l   #1,d0
+        bcc.s   .nopoly
+        eor.l   #$edb88320,d0
+.nopoly:
+        dbf     d3,.bit
+        dbf     d1,.byte
+        not.l   d0
+        move.l  d0,V_AUDIOCRC(a4)
+        add.l   #AUD_SAMPLES,V_AUDION(a4)
+        movem.l (sp)+,d0-d3/a0
+        rts
+        endc
 
 ;----------------------------------------------------------------------
 ; audio_nextpkt - pasa el lector de audio al paquete siguiente.
@@ -920,23 +978,25 @@ do_blit:
         move.l  a3,d0                         ; d0 = plano origen
         move.w  d6,d1
         subq.w  #1,d1
-.plane: btst    #6,DMACONR(a0)                ; BBUSY: se lee dos veces por el
+        btst    #6,DMACONR(a0)                ; BBUSY: se lee dos veces por el
 .w1:    btst    #6,DMACONR(a0)                ; bug de lectura del 68000
         bne.s   .w1
+        ; Los planos comparten control, mascaras y modulos. Se reinstalan
+        ; al entrar a la copia; las interrupciones de audio/VBL no los tocan.
         move.w  #$09f0,BLTCON0(a0)            ; A -> D, minterm $F0, sin shift
         clr.w   BLTCON1(a0)
         move.l  #$ffffffff,BLTAFWM(a0)        ; BLTAFWM y BLTALWM, contiguos
         clr.w   BLTAMOD(a0)
         clr.w   BLTDMOD(a0)
-        move.l  d0,BLTAPT(a0)
+.plane: move.l  d0,BLTAPT(a0)
         move.l  a1,BLTDPT(a0)
         move.w  d2,BLTSIZE(a0)                ; escribirlo arranca el blit
         add.l   #PLANE_BYTES,d0
         lea     PLANE_BYTES(a1),a1
-        dbf     d1,.plane
         btst    #6,DMACONR(a0)
 .w2:    btst    #6,DMACONR(a0)
         bne.s   .w2
+        dbf     d1,.plane
         movem.l (sp)+,d0-d1/a1
         rts
 
@@ -1152,6 +1212,12 @@ bench_finish:
         bsr     crc_fb
         lea     infobuf(pc),a0
         move.l  d0,132(a0)
+
+        ifd     VERIFY_AUDIO
+        move.l  #$41554443,136(a0)            ; "AUDC": CRC de audio real
+        move.l  V_AUDIOCRC(a4),140(a0)
+        move.l  V_AUDION(a4),144(a0)
+        endc
 
         move.l  V_IOREQ(a4),a1
         move.w  #CMD_WRITE,IO_COMMAND(a1)

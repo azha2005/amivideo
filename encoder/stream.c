@@ -99,10 +99,14 @@ long a5_cyc_blit(int planes)
 
 long a5_delta_cost(const A5DeltaStats *st, int planes)
 {
+    long full = planes >= 3 ? st->full_rows : 0;
+    long dense_bytes = full * A5_ROWBYTES * planes;
+    long dense_byte_cost = planes >= 5 ? A5_CYC_FULL_BYTE_5PL : A5_CYC_FULL_BYTE;
     return A5_CYC_FRAME
-         + (long)st->rows  * A5_CYC_ROW
-         + (long)st->cols  * A5_CYC_COL
-         + (long)st->bytes * a5_cyc_byte(planes);
+         + ((long)st->rows - full) * (planes >= 3 ? A5_CYC_ROW : A5_CYC_ROW_GENERIC)
+         + ((long)st->cols - full * A5_ROWBYTES) * A5_CYC_COL
+         + ((long)st->bytes - dense_bytes) * a5_cyc_byte(planes)
+         + full * A5_CYC_FULL_ROW + dense_bytes * dense_byte_cost;
 }
 
 int a5_delta_encode(A5Buf *out, const uint8_t *hidden, const uint8_t *target,
@@ -147,6 +151,7 @@ int a5_delta_encode(A5Buf *out, const uint8_t *hidden, const uint8_t *target,
         rowmask[y >> 3] |= (uint8_t)(0x80 >> (y & 7));
         st->rows++;
         st->cols += any;
+        if (any == A5_ROWBYTES) st->full_rows++;
 
         a5buf_write(out, colmask, sizeof colmask);
         for (b = 0; b < A5_ROWBYTES; b++) {
@@ -181,6 +186,8 @@ const uint8_t *a5_delta_apply(uint8_t *fb, const uint8_t *data,
         colmask = data;
         data += A5_COLMASK_SIZE;
         st->rows++;
+        if (colmask[0] == 0xff && colmask[1] == 0xff && colmask[2] == 0xf0)
+            st->full_rows++;
 
         /* Los 4 bits bajos del tercer byte no corresponden a ninguna
          * columna: tienen que venir en cero. */

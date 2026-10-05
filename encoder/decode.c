@@ -67,35 +67,35 @@ static uint32_t frame_crc(const uint8_t *vis, size_t fsz,
  * en FORMAT.md). Aca se cruzan con las estadisticas del mismo delta y se
  * ajusta el modelo de costo por minimos cuadrados. */
 #define MEAS_TIMING_SECTOR 1754
-#define MEAS_TIMING_MAX    640
+#define MEAS_TIMING_MAX    512
 #define MEAS_INFO_SECTOR   1759
 
-typedef struct { int n, rows, cols, bytes; double cycles; } MeasPoint;
+typedef struct { int n, rows, cols, bytes, full_rows; double cycles; } MeasPoint;
 
-/* Resuelve A x = b de 3x3 por eliminacion con pivoteo parcial. */
-static int solve3(double A[3][3], double b[3], double x[3])
+/* Resuelve el modelo de filas/columnas y, si existen, filas densas. */
+static int solve_model(double A[4][4], double b[4], double x[4], int n)
 {
     int i, j, k;
 
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < n; i++) {
         int p = i;
-        for (j = i + 1; j < 3; j++)
+        for (j = i + 1; j < n; j++)
             if (fabs(A[j][i]) > fabs(A[p][i])) p = j;
         if (fabs(A[p][i]) < 1e-12) return -1;
         if (p != i) {
             double t;
-            for (k = 0; k < 3; k++) { t = A[p][k]; A[p][k] = A[i][k]; A[i][k] = t; }
+            for (k = 0; k < n; k++) { t = A[p][k]; A[p][k] = A[i][k]; A[i][k] = t; }
             t = b[p]; b[p] = b[i]; b[i] = t;
         }
-        for (j = i + 1; j < 3; j++) {
+        for (j = i + 1; j < n; j++) {
             double f = A[j][i] / A[i][i];
-            for (k = i; k < 3; k++) A[j][k] -= f * A[i][k];
+            for (k = i; k < n; k++) A[j][k] -= f * A[i][k];
             b[j] -= f * b[i];
         }
     }
-    for (i = 2; i >= 0; i--) {
+    for (i = n - 1; i >= 0; i--) {
         double s = b[i];
-        for (k = i + 1; k < 3; k++) s -= A[i][k] * x[k];
+        for (k = i + 1; k < n; k++) s -= A[i][k] * x[k];
         x[i] = s / A[i][i];
     }
     return 0;
@@ -180,7 +180,7 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
     const uint8_t *in = adf + MEAS_INFO_SECTOR * 512;
     uint32_t bytes = be32(in + 12), tod = be32(in + 8);
     double load_s = tod / A5_VBL_HZ;
-    double A[3][3] = { { 0 } }, b[3] = { 0 }, x[3] = { 0 };
+    double A[4][4] = { { 0 } }, b[4] = { 0 }, x[4] = { 0 };
     double sum = 0, maxm = 0, sse = 0, sst = 0, mean, maxres = 0;
     double ratio = 0, worst_model = 0, ysum = 0, ymean;
     double fill_cpu = 0, a_t0 = 0, a_per = 1;  /* audio medido */
@@ -189,6 +189,7 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
     double *y = NULL;        /* medido menos los llenados de audio */
     int *fills = NULL;       /* llenados de audio dentro de cada delta */
     int i, j, k, maxn = -1;
+    int nfit = 3;
 
     printf("\n--- mediciones de la Amiga ---\n");
     printf("carga      : %lu bytes en %.1f s = %.1f KB/s (%lu VSYNC)\n",
@@ -316,17 +317,22 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
     }
 
     for (i = 0; i < np; i++) {
-        double f[3];
-        A5DeltaStats s;
+        if (pt[i].full_rows) nfit = 4;
+    }
+    for (i = 0; i < np; i++) {
+        double f[4];
+        A5DeltaStats s = {0};
         f[0] = 1; f[1] = pt[i].rows; f[2] = pt[i].cols;
-        for (j = 0; j < 3; j++) {
-            for (k = 0; k < 3; k++) A[j][k] += f[j] * f[k];
+        f[3] = pt[i].full_rows;
+        for (j = 0; j < nfit; j++) {
+            for (k = 0; k < nfit; k++) A[j][k] += f[j] * f[k];
             b[j] += f[j] * y[i];
         }
         sum += pt[i].cycles;
         ysum += y[i];
         if (pt[i].cycles > maxm) { maxm = pt[i].cycles; maxn = i; }
         s.rows = pt[i].rows; s.cols = pt[i].cols; s.bytes = pt[i].bytes;
+        s.full_rows = pt[i].full_rows;
         s.cycles = 0;
         ratio += (a5_delta_cost(&s, planes) + fills[i] * fillc) / pt[i].cycles;
     }
@@ -334,22 +340,24 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
     ymean = ysum / np;
     ratio /= np;
 
-    if (solve3(A, b, x) != 0) {
+    if (solve_model(A, b, x, nfit) != 0) {
         printf("decodif.   : el ajuste no tiene solucion (datos degenerados)\n");
         free(y); free(fills);
         return;
     }
     for (i = 0; i < np; i++) {
-        double pred = x[0] + x[1] * pt[i].rows + x[2] * pt[i].cols;
+        double pred = x[0] + x[1] * pt[i].rows + x[2] * pt[i].cols
+                    + x[3] * pt[i].full_rows;
         double r = y[i] - pred;
         sse += r * r;
         sst += (y[i] - ymean) * (y[i] - ymean);
         if (fabs(r) > maxres) maxres = fabs(r);
     }
     {
-        A5DeltaStats s;
+        A5DeltaStats s = {0};
         s.rows = pt[maxn].rows; s.cols = pt[maxn].cols;
         s.bytes = pt[maxn].bytes; s.cycles = 0;
+        s.full_rows = pt[maxn].full_rows;
         worst_model = (double)a5_delta_cost(&s, planes) + fills[maxn] * fillc;
     }
 
@@ -360,8 +368,9 @@ static void report_measure(const uint8_t *adf, const MeasPoint *pt, int np,
     printf("modelo     : el actual (con %ld ciclos por llenado) predice en "
            "promedio el %.1f%% de lo medido; para el peor frame, %.2f ms\n",
            fillc, ratio * 100, worst_model * 1000 / A5_CPU_HZ);
-    printf("ajuste     : ciclos = %.0f + %.1f x filas + %.1f x columnas  "
-           "(R2 = %.4f)%s\n", x[0], x[1], x[2], sst > 0 ? 1 - sse / sst : 0,
+    printf("ajuste     : ciclos = %.0f + %.1f x filas + %.1f x columnas "
+           "%+.1f x filas densas (R2 = %.4f)%s\n", x[0], x[1], x[2], x[3],
+           sst > 0 ? 1 - sse / sst : 0,
            fill_cpu > 0 ? ", sin los llenados de audio" : "");
     printf("             residuo maximo %.3f ms\n", maxres * 1000 / A5_CPU_HZ);
     printf("             con %d planos: %.1f ciclos por byte literal si se "
@@ -870,6 +879,7 @@ int main(int argc, char **argv)
                     mpts[nmp].rows = ds.rows;
                     mpts[nmp].cols = ds.cols;
                     mpts[nmp].bytes = ds.bytes;
+                    mpts[nmp].full_rows = ds.full_rows;
                     mpts[nmp].cycles = 2.0 * cck;
                     nmp++;
                 }
@@ -991,6 +1001,30 @@ int main(int argc, char **argv)
             if (!okfb) {
                 printf("VERIFICACION: FALLA. El reproductor no dejo en Chip "
                        "lo mismo que el decoder de referencia.\n");
+                return 1;
+            }
+        }
+    }
+
+    if (adf) {
+        const uint8_t *info = adf + MEAS_INFO_SECTOR * 512;
+        if (!memcmp(info + 136, "AUDC", 4)) {
+            size_t count = be32(info + 144);
+            size_t real = count < nasamples ? count : nasamples;
+            uint32_t got = a5_crc32(asamples, real, 0);
+            uint32_t want = be32(info + 140);
+            uint8_t last = nasamples ? (uint8_t)asamples[nasamples - 1] : 0;
+            size_t i;
+            for (i = real; i < count; i++) got = a5_crc32(&last, 1, got);
+            printf("audio Amiga: %lu muestras (incluido relleno), CRC %08lX "
+                   "vs %08lX -> %s\n", (unsigned long)count,
+                   (unsigned long)want, (unsigned long)got,
+                   want == got ? "identico" : "DISTINTO");
+            if (want != got) return 1;
+            if (count < nasamples) {
+                printf("VERIFICACION: FALLA. El reproductor no lleno todo "
+                       "el audio (%lu de %lu muestras).\n",
+                       (unsigned long)count, (unsigned long)nasamples);
                 return 1;
             }
         }

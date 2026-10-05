@@ -2298,3 +2298,137 @@ decoder de referencia OK.
 - ~~WAIT horizontal del Copper para el doblado vertical.~~ Resuelto en el
   Hito 3 con el truco del modulo (ver arriba).
 - ~~Sincronia de audio y costo del audio en la CPU.~~ Medidos en el Hito 5.
+
+## 2026-10-05 — PCM8 por bloques, filas densas y lotes del Blitter
+
+Se contrastaron las ideas del port de SMW con las rutinas reales de amivideo.
+Se conservaron tres cambios, sin cambiar el formato v6 ni la imagen/audio.
+Las copias durante la carga y el recorte horizontal del predictor no forman
+parte de esta tanda.
+
+**Metodo.** WinUAE de `a500vp.uae`: OCS, 68000 cycle-exact, 512 KB Chip +
+512 KB slow, KS 1.2, disquete al 100 %, sin blits inmediatos. Binarios
+ensamblados con vasm 1.9, `-m68000 -no-opt -DBENCH=1`. Se conservaron el
+binario base y las variantes en `work/bench/`, con ADF, configuracion,
+resumen JSON y log del decoder por corrida. No son medidas de hardware real.
+
+### 1. PCM8: copiar tramos completos
+
+`audio_fill` copia el menor tramo entre audio pendiente del paquete y espacio
+del buffer. Usa bloques de 16 bytes con `MOVEM.L` y un bucle de bytes para
+el resto. Los paquetes entregan muestras pares y los buffers tienen 512
+bytes: las copias largas mantienen alineacion de palabra. Se conserva la
+ultima muestra para el relleno al terminar y se recorren paquetes vacios.
+
+`au_pcm8.a5v`, 5 planos, 150 paquetes, periodo 443, 94 IRQ:
+
+| Llenado de un buffer | Base | PCM8 por bloques |
+|---|---:|---:|
+| Media | 4,430 ms | 0,881 ms |
+| Maximo | 4,626 ms | 2,078 ms |
+| CPU media a esta frecuencia | 6,93 % | 1,38 % |
+
+La media baja **80,1 %**. `A5_CYC_AUDIO_FILL_PCM8` pasa de 28200 a **7000**:
+la media medida es 6246 ciclos, y se deja margen para la interrupcion.
+El maximo no se usa como media del modelo; sigue habiendo variacion por
+fronteras de paquetes y por fase del DMA.
+
+### 2. Filas con las 20 columnas marcadas
+
+`DELTA_ROWS` reconoce `$FFFFF000` y usa `DELTA_FULL`, con escrituras
+desenrolladas columna/plano. Se conserva el recorrido disperso y el formato
+de los bytes. Los casos de 1-2 planos mantienen la ruta generica.
+
+Banco reproducible: `tools/bench_fixtures.py`, semilla fija por cantidad de
+planos, 72 paquetes, 96 filas activas. Los primeros 24 son densos; los
+siguientes 24 alternan mascaras dispersas, grupos vacios, ultima columna y
+19 columnas; los ultimos 24 mezclan filas densas/dispersas. Incluye dos
+repeticiones y 22 copias del visible. Se miden los deltas por separado de
+las copias.
+
+| Planos | Media de todos los deltas, base → denso | Mejora | Media de deltas densos, base → denso |
+|---|---:|---:|---:|
+| 3 | 33,32 → 27,91 ms | 16,2 % | 45,72 → 34,41 ms |
+| 4 | 40,37 → 34,94 ms | 13,4 % | 56,56 → 45,14 ms |
+| 5 | 52,60 → 46,46 ms | 11,7 % | 74,66 → 61,80 ms |
+
+Con 3 planos desaparecen los atrasos del banco (69 → 0). Con 4, el atraso
+maximo baja de 49 a 26 VBL; con 5, de 79 a 64. Es una carga deliberadamente
+pesada, no una promesa sobre cualquier video.
+
+La comprobacion agrega costo a las filas dispersas: en ese tramo del banco
+el tiempo sube **2,0–2,7 %**. Dos fragmentos reales de 128 paquetes, con
+fib4 y 5 planos, comparados contra la version final:
+
+| Fragmento | Media del delta, base → final | Peor delta, base → final | Frames tarde |
+|---|---:|---:|---:|
+| `see30_32c_mh4` | 49,86 → 47,81 ms | 81,47 → 71,68 ms | 3 → 2 |
+| `house_auto` (sin filas completas) | 21,05 → 21,42 ms | 51,42 → 51,87 ms | 0 → 0 |
+
+Se conserva por el ahorro de 11–13 ms en frames densos y la reduccion de
+los picos. El costo en el fragmento de House es 1,7 %, sin generar atrasos.
+
+El encoder y el decoder cuentan `full_rows`. El modelo separa ambas rutas:
+940 ciclos por fila dispersa (900 en la ruta generica), 200 por fila densa,
+y 40/44 por byte denso con 3-4/5 planos. La columna densa no paga el recorrido
+de mascara. Por fila completa se midieron 2543/3336/4566 ciclos; el modelo
+usa 2600/3400/4600. El informe de regresion agrega un termino de filas densas.
+
+### 3. Configurar el Blitter una vez por copia
+
+`do_blit` instala control, mascaras y modulos despues de esperar al Blitter.
+Por plano escribe solo origen, destino y tamano. Mantiene la doble lectura
+de BBUSY y espera antes de reutilizar punteros. Las IRQ de audio/VBL no
+usan el Blitter.
+
+Comparacion contra la variante que ya contiene PCM8 y filas densas:
+22 copias de 96 filas, sin audio para no mezclar IRQ con el ahorro.
+
+| Planos | Media de la copia, antes → despues | Ahorro |
+|---|---:|---:|
+| 3 | 3,757 → 3,725 ms | 0,032 ms |
+| 5 | 8,394 → 8,288 ms | 0,105 ms |
+
+Es un ahorro pequeno, pero el cambio es simple y evita escrituras custom
+redundantes. Se conserva el coeficiente anterior de copia como margen.
+
+### Correccion, tamano y reproduccion del banco
+
+Los CRC de los dos framebuffers coinciden con el decoder en las corridas
+de cada variante y los fragmentos reales. Los fixtures llevan CRC por frame
+calculado independientemente en Python.
+
+La compilacion `-DBENCH=1 -DVERIFY_AUDIO=1` acumula ademas el CRC de cada
+buffer escrito para Paula. El decoder comprueba todo el audio y el relleno
+de ultima muestra. Pasaron PCM8 real y un fixture con longitudes de audio
+0, 2, 14, 16, 18, 30, 32, 34, 510, 512, 514 y 1600 bytes por paquete.
+Alterar el CRC de audio del ADF produce fallo. Esta pasada agrega trabajo
+y se ejecuta separada de las mediciones de rendimiento.
+
+Tambien pasaron fib4 real y una codificacion nueva de 75 frames/3 planos,
+PCM8, con 74 copias del visible. El encoder predijo cero atrasos y el
+reproductor normal de medicion conto cero; su CRC de audio se comprobo en
+otra corrida. El modelo predice 46,91 ms para el primer frame denso y se
+midieron 45,55 ms. La ruta generica de 2 planos se verifica con el mismo
+banco de mascaras y CRC.
+
+El reproductor normal pasa de 4648 a **7620 bytes** (+2972). Redondeado a
+sectores ocupa cinco sectores adicionales: **2560 bytes menos para video**
+en el disco normal. El escritor de ADF calcula el presupuesto con el
+binario real; los clips que llenaban el disco deben volver a codificarse.
+
+Comandos (Windows; Python 3 solo para estas herramientas):
+
+```powershell
+.\build.ps1
+python tools/bench_fixtures.py
+python tools/bench.py --tag final --stream work/bench/fixtures/p3.a5v
+python tools/bench.py --tag final --stream work/bench/fixtures/p4.a5v
+python tools/bench.py --tag final --stream work/bench/fixtures/p5.a5v
+```
+
+Para comparar, ensamblar el codigo anterior en un binario separado y pasarlo
+con `--player`. Para CRC de audio, agregar `-DVERIFY_AUDIO=1` a la compilacion
+`BENCH` y pasar ese binario. `--rom`, `--winuae` y `--wait` permiten ajustar
+rutas/tiempo de corrida. El runner usa un ADF propio por tag y cierre normal
+del emulador, para que se vuelquen las pistas escritas.

@@ -57,6 +57,23 @@ adp_n   set     adp_n+1
         dbf     d1,.col\@
         endm
 
+; DELTA_FULL \1 - las 20 columnas de una fila densa, sin caminar mascara
+; ni mover el puntero por columna. Conserva el orden columna/plano del v6.
+DELTA_FULL  macro
+adf_c   set     0
+        rept    20
+adf_p   set     0
+        rept    \1
+        moveq   #0,d7
+        move.b  (a4)+,d7
+        add.w   d7,d7
+        move.w  0(a3,d7.w),adf_p*PLANE_BYTES+adf_c*2(a5)
+adf_p   set     adf_p+1
+        endr
+adf_c   set     adf_c+1
+        endr
+        endm
+
 ; DELTA_ROWS \1 - el lazo de filas para una cantidad fija de planos.
 ; Las 20 columnas se recorren en dos grupos de 8 y uno de 4: si los 8 bits
 ; de arriba de la mascara estan en cero se saltan las 8 columnas de una,
@@ -78,6 +95,8 @@ DELTA_ROWS  macro
         move.b  (a4)+,d2
         lsl.w   #8,d2
 
+        cmp.l   #$fffff000,d2                 ; las 20 columnas marcadas
+        beq     .full\@
         move.l  a5,a6                         ; a6 = columna 0 de la fila
         cmp.l   #$00ffffff,d2                 ; primeras 8 sin marcar?
         bhi.s   .g1\@
@@ -97,6 +116,10 @@ DELTA_ROWS  macro
 .g2end\@:
         moveq   #3,d1                         ; las ultimas 4
         DELTA_COLS  \1
+        bra     .nextrow\@
+
+.full\@:
+        DELTA_FULL  \1
 
 .nextrow\@:
         lea     FB_ROWBYTES(a5),a5

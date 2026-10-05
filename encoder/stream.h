@@ -103,7 +103,16 @@
  */
 #define A5_CPU_HZ            7093790.0
 #define A5_CYC_FRAME         0
-#define A5_CYC_ROW           900
+/* 2026-10-05: DELTA_FULL medido en OCS cycle-exact sin audio, 96 filas.
+ * Por fila completa: 2543/3336/4566 ciclos con 3/4/5 planos. La ruta
+ * dispersa paga la comprobacion adicional (~40 ciclos/fila). La ruta
+ * densa tiene su propio costo por literal; no se le carga el recorrido
+ * de mascara. 200 ciclos/fila dejan margen sobre lo medido. Ver DECISIONS. */
+#define A5_CYC_ROW_GENERIC   900
+#define A5_CYC_ROW           940
+#define A5_CYC_FULL_ROW      200
+#define A5_CYC_FULL_BYTE     40
+#define A5_CYC_FULL_BYTE_5PL 44
 #define A5_CYC_COL           19
 #define A5_CYC_BYTE          36
 #define A5_CYC_BYTE_5PL      43
@@ -126,7 +135,10 @@ long a5_cyc_byte(int planes);
  *   pcm8: 27918 de media (el peor 28690), mas los mismos ~300: 6,2 %. */
 #define A5_AUD_BUF_SAMPLES   512
 #define A5_CYC_AUDIO_FILL    32300
-#define A5_CYC_AUDIO_FILL_PCM8 28200
+/* PCM8 por tramos con MOVEM: media 6246 ciclos en au_pcm8 (5 planos,
+ * 94 IRQ). Se usan 7000 incluyendo entrada/salida y margen; VERIFY_AUDIO
+ * es una pasada separada y nunca se usa para calibrar tiempos. */
+#define A5_CYC_AUDIO_FILL_PCM8 7000
 /* ADPCM: ESTIMADO contando instrucciones del decodificador de A5MU
  * (player/music.s, adpcm_step), no medido todavia en el disco de medicion.
  * Son ~115 ciclos por muestra contra ~63 de fib4: el paso adaptativo se
@@ -183,6 +195,7 @@ typedef struct {
     int  bytes;       /* bytes literales escritos = cols * planos */
     int  same;        /* de esos, los que escriben lo que ya estaba */
     long cycles;      /* costo estimado de decodificacion */
+    int  full_rows;   /* mascara de las 20 columnas: ruta densa de 3-5 planos */
 } A5DeltaStats;
 
 /* Codifica la diferencia entre el buffer oculto y el frame objetivo, los dos
